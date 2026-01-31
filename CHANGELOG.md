@@ -32,3 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - gemini-3-pro-preview (alias: gemini-3-pro)
 - gemini-2.5-pro
 - gemini-2.0-flash
+
+## [1.0.1] - 2026-01-31
+
+### Fixed
+- Updated @anthropic-ai/vertex-sdk to v0.14.2 for Node.js 24 compatibility
+- Fixed ESM module resolution issues
