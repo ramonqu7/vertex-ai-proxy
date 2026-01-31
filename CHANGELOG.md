@@ -46,3 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Auto-start on boot
   - `--project`, `--port`, `--regions` options
   - `--uninstall` to remove service
+
+## [1.0.3] - 2026-01-31
+
+### Fixed
+- Removed User= from systemd user service (caused exit code 216)

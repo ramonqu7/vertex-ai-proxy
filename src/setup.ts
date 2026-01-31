@@ -74,7 +74,6 @@ After=network.target
 
 [Service]
 Type=simple
-User=${user}
 Environment=PROJECT_ID=${projectId}
 Environment=PORT=${port}
 Environment=CLAUDE_REGIONS=${regions}
