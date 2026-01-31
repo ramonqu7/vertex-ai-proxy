@@ -38,3 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Updated @anthropic-ai/vertex-sdk to v0.14.2 for Node.js 24 compatibility
 - Fixed ESM module resolution issues
+
+## [1.0.2] - 2026-01-31
+
+### Added
+- `vertex-ai-proxy-setup` command for systemd service installation
+  - Auto-start on boot
+  - `--project`, `--port`, `--regions` options
+  - `--uninstall` to remove service

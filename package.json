@@ -1,12 +1,13 @@
 {
   "name": "vertex-ai-proxy",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "OpenAI-compatible proxy for Google Vertex AI (Claude + Gemini) with automatic failover, retries, and prompt caching",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
     "vertex-ai-proxy": "dist/cli.js",
-    "vap": "dist/cli.js"
+    "vap": "dist/cli.js",
+    "vertex-ai-proxy-setup": "dist/setup.js"
   },
   "scripts": {
     "build": "tsc",
