@@ -153,13 +153,12 @@ export const MODEL_CATALOG: Record<string, ModelSpec> = {
     capabilities: ['text', 'vision', 'tools']
   },
   // Gemini Models
-'gemini-3-pro-image-preview': {    id: 'gemini-3-pro-image-preview',    name: 'Gemini 3 Pro Image',    provider: 'google',    contextWindow: 65536,    maxTokens: 32768,    inputPrice: 2.5,    outputPrice: 15,    regions: ['global'],    capabilities: ['text', 'vision', 'image-generation']  },
   'gemini-3-pro-preview': {
     id: 'gemini-3-pro-preview',
     name: 'Gemini 3 Pro',
     provider: 'google',
-    contextWindow: 1048576,
-    maxTokens: 65536,
+    contextWindow: 1000000,
+    maxTokens: 8192,
     inputPrice: 2.5,
     outputPrice: 15,
     regions: ['global'],
@@ -848,71 +847,11 @@ async function handleGenAIChat(res: Response, options: {
     location: "global"
   });
   
-  // Helper to convert message content to Gemini parts
-  function contentToParts(content: string | any[]): any[] {
-    if (typeof content === "string") {
-      return [{ text: content }];
-    }
-    
-    // Handle array content (multimodal)
-    return content.map(part => {
-      if (part.type === "text") {
-        return { text: part.text };
-      } else if (part.type === "image_url") {
-        const url = part.image_url?.url || "";
-        // Check if its a base64 data URL
-        if (url.startsWith("data:")) {
-          const matches = url.match(/^data:([^;]+);base64,(.+)$/);
-          if (matches) {
-            return {
-              inlineData: {
-                mimeType: matches[1],
-                data: matches[2]
-              }
-            };
-          }
-        }
-        // For regular URLs, need to fetch and convert to base64
-        return { pendingUrl: url };
-      }
-      return { text: JSON.stringify(part) };
-    });
-  }
-
-  // Build contents from messages with pending URL resolution
-  const rawContents = messages.map(msg => ({
+  // Build contents from messages
+  const contents = messages.map(msg => ({
     role: msg.role === "assistant" ? "model" : "user",
-    parts: contentToParts(msg.content)
+    parts: [{ text: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content) }]
   }));
-
-  // Resolve pending URLs to base64
-  async function resolveParts(parts: any[]): Promise<any[]> {
-    return Promise.all(parts.map(async (part) => {
-      if (part.pendingUrl) {
-        try {
-          const response = await fetch(part.pendingUrl);
-          const buffer = await response.arrayBuffer();
-          const base64 = Buffer.from(buffer).toString("base64");
-          const contentType = response.headers.get("content-type") || "image/jpeg";
-          return {
-            inlineData: {
-              mimeType: contentType,
-              data: base64
-            }
-          };
-        } catch (e) {
-          log("Failed to fetch image URL: " + part.pendingUrl, "WARN");
-          return { text: "[Image could not be loaded]" };
-        }
-      }
-      return part;
-    }));
-  }
-
-  const contents = await Promise.all(rawContents.map(async (msg) => ({
-    role: msg.role,
-    parts: await resolveParts(msg.parts)
-  })));
 
   if (stream) {
     res.setHeader("Content-Type", "text/event-stream");
@@ -960,38 +899,9 @@ async function handleGenAIChat(res: Response, options: {
       }
     });
 
-    log("GenAI candidates: " + JSON.stringify(response.candidates, null, 2).slice(0, 2000));
+    const text = response.text || "";
     
-    // Extract text and images from the response
-    let text = "";
-    const images: Array<{mimeType: string; data: string}> = [];
-    
-    try {
-      if (response.candidates && response.candidates[0]?.content?.parts) {
-        for (const part of response.candidates[0].content.parts as any[]) {
-          if (part.text && !part.thought) {
-            text += part.text;
-          } else if (part.inlineData) {
-            images.push({
-              mimeType: part.inlineData.mimeType || "image/png",
-              data: part.inlineData.data || ""
-            });
-          }
-        }
-      }
-      // Fallback to response.text if no text found
-      if (!text) {
-        try {
-          text = response.text || "";
-        } catch (e) {}
-      }
-    } catch (e) {
-      text = "";
-    }
-    
-    log("Extracted text length: " + text.length + ", images: " + images.length);
-    
-    const result: any = {
+    res.json({
       id: `chatcmpl-${Date.now()}`,
       object: "chat.completion",
       created: Math.floor(Date.now() / 1000),
@@ -1006,17 +916,7 @@ async function handleGenAIChat(res: Response, options: {
         completion_tokens: response.usageMetadata?.candidatesTokenCount || 0,
         total_tokens: response.usageMetadata?.totalTokenCount || 0
       }
-    };
-    
-    // Add generated images to response
-    if (images.length > 0) {
-      result.images = images.map(img => ({
-        b64_json: img.data,
-        content_type: img.mimeType
-      }));
-    }
-    
-    res.json(result);
+    });
   }
 }
 
