@@ -38,7 +38,7 @@ import * as os from 'os';
 import * as yaml from 'js-yaml';
 import * as readline from 'readline';
 
-const VERSION = '1.3.0';
+const VERSION = '1.3.1';
 const CONFIG_DIR = path.join(os.homedir(), '.vertex-proxy');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.yaml');
 const DATA_DIR = path.join(os.homedir(), '.vertex_proxy');
