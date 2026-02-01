@@ -8,6 +8,7 @@
  *   vertex-ai-proxy start                 Start as background daemon
  *   vertex-ai-proxy stop                  Stop the daemon
  *   vertex-ai-proxy restart               Restart the daemon
+ *   vertex-ai-proxy kill                  Force kill proxy and free port 8001
  *   vertex-ai-proxy status                Show proxy status
  *   vertex-ai-proxy logs                  Show proxy logs
  *   vertex-ai-proxy test                  Run proxy test suite
@@ -527,6 +528,108 @@ async function restartDaemon(options: any) {
   
   await startDaemon(options);
 }
+async function killDaemon() {
+  console.log(chalk.blue.bold('\n💀 Killing Vertex AI Proxy\n'));
+  
+  let killed = false;
+  
+  // Step 1: Stop PM2 managed process if exists
+  console.log(chalk.cyan('Checking PM2...'));
+  try {
+    const pm2List = execSync('pm2 jlist 2>/dev/null || echo "[]"', { encoding: 'utf8' });
+    const processes = JSON.parse(pm2List);
+    const proxyProcess = processes.find((p: any) => p.name === 'vertex-proxy');
+    
+    if (proxyProcess) {
+      console.log(chalk.gray(`  Found PM2 process: vertex-proxy (PID: ${proxyProcess.pid})`));
+      execSync('pm2 delete vertex-proxy 2>/dev/null', { encoding: 'utf8' });
+      console.log(chalk.green('  ✓ Stopped PM2 process'));
+      killed = true;
+    } else {
+      console.log(chalk.gray('  No PM2 process found'));
+    }
+  } catch (e: any) {
+    console.log(chalk.gray('  PM2 not available or no process'));
+  }
+  
+  // Step 2: Kill via PID file (native daemon)
+  const pid = getPid();
+  if (pid) {
+    console.log(chalk.cyan('Checking PID file...'));
+    if (isRunning(pid)) {
+      try {
+        process.kill(pid, 'SIGKILL');
+        console.log(chalk.green(`  ✓ Killed process ${pid}`));
+        killed = true;
+      } catch (e) {
+        console.log(chalk.gray(`  Process ${pid} already dead`));
+      }
+    }
+    // Clean up PID file
+    if (fs.existsSync(PID_FILE)) {
+      fs.unlinkSync(PID_FILE);
+      console.log(chalk.gray('  ✓ Cleaned up PID file'));
+    }
+  }
+  
+  // Step 3: Kill anything on port 8001
+  console.log(chalk.cyan('Checking port 8001...'));
+  try {
+    // Try lsof first
+    const lsofOutput = execSync('lsof -ti :8001 2>/dev/null || true', { encoding: 'utf8' }).trim();
+    if (lsofOutput) {
+      const pids = lsofOutput.split('\n').filter(p => p);
+      for (const portPid of pids) {
+        try {
+          process.kill(parseInt(portPid), 'SIGKILL');
+          console.log(chalk.green(`  ✓ Killed process ${portPid} on port 8001`));
+          killed = true;
+        } catch (e) {
+          // Process might have died already
+        }
+      }
+    } else {
+      console.log(chalk.gray('  No process on port 8001'));
+    }
+  } catch (e) {
+    // Try fuser as fallback
+    try {
+      execSync('fuser -k 8001/tcp 2>/dev/null', { encoding: 'utf8' });
+      console.log(chalk.green('  ✓ Killed process on port 8001 (via fuser)'));
+      killed = true;
+    } catch (e2) {
+      console.log(chalk.gray('  Port 8001 is free'));
+    }
+  }
+  
+  // Step 4: Clean up stats file
+  if (fs.existsSync(STATS_FILE)) {
+    fs.unlinkSync(STATS_FILE);
+    console.log(chalk.gray('  ✓ Cleaned up stats file'));
+  }
+  
+  // Verify port is free
+  console.log(chalk.cyan('\nVerifying...'));
+  await new Promise(resolve => setTimeout(resolve, 500));
+  
+  try {
+    const check = execSync('lsof -ti :8001 2>/dev/null || true', { encoding: 'utf8' }).trim();
+    if (check) {
+      console.log(chalk.yellow(`⚠️  Port 8001 still in use by PID: ${check}`));
+      console.log(chalk.gray('   You may need to run: sudo kill -9 ' + check));
+    } else {
+      console.log(chalk.green('✓ Port 8001 is free'));
+    }
+  } catch (e) {
+    console.log(chalk.green('✓ Port 8001 is free'));
+  }
+  
+  if (killed) {
+    console.log(chalk.green('\n✓ Proxy killed successfully\n'));
+  } else {
+    console.log(chalk.yellow('\n⚠️  No running proxy found\n'));
+  }
+}
 
 async function showStatus() {
   console.log(chalk.blue.bold('\n📊 Vertex AI Proxy Status\n'));
@@ -905,6 +1008,11 @@ program.command('start')
 program.command('stop')
   .description('Stop the background daemon')
   .action(stopDaemon);
+
+
+program.command('kill')
+  .description('Force kill proxy and free port 8001 (PM2, PID file, and port)')
+  .action(killDaemon);
 
 program.command('restart')
   .description('Restart the background daemon')
