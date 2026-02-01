@@ -429,7 +429,8 @@ async function startDaemon(options: any) {
     GOOGLE_CLOUD_PROJECT: projectId,
     VERTEX_PROXY_PORT: port,
     VERTEX_PROXY_REGION: options.region || config.default_region,
-    VERTEX_PROXY_GOOGLE_REGION: options.googleRegion || config.google_region
+    VERTEX_PROXY_GOOGLE_REGION: options.googleRegion || config.google_region,
+    VERTEX_PROXY_START: '1'
   };
   
   const logStream = fs.openSync(LOG_FILE, 'a');

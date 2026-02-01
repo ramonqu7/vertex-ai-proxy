@@ -1228,6 +1228,6 @@ export async function startProxy(daemonMode = false) {
 export { proxyStats, loadStats, DATA_DIR, LOG_FILE };
 
 // Run if executed directly
-if (require.main === module) {
+if (process.env.VERTEX_PROXY_START === '1' || process.argv.includes('--start')) {
   startProxy();
 }
