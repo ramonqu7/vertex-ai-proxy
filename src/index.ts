@@ -40,8 +40,11 @@ interface Config {
 }
 
 interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string | any[];
+  tool_call_id?: string;
+  tool_calls?: any[];
+  name?: string;
 }
 
 // ============================================================================
@@ -437,21 +440,25 @@ function truncateMessages(
 // ============================================================================
 
 async function handleChatCompletions(req: Request, res: Response, config: Config) {
-  const { model: modelInput, messages, stream, max_tokens, temperature } = req.body;
-  
+  const requestId = `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  const { model: modelInput, messages, stream, max_tokens, temperature, tools, tool_choice } = req.body;
+
+  log(`[${requestId}] ====== NEW REQUEST ======`);
+  log(`[${requestId}] Model: ${modelInput}, Stream: ${stream}, Messages: ${messages?.length}`);
+
   // Resolve model alias
   const modelId = resolveModel(modelInput, config);
   const modelSpec = getModelSpec(modelId);
-  
+
   if (!modelSpec) {
-    log(`Unknown model: ${modelInput} -> ${modelId}`, 'WARN');
+    log(`[${requestId}] Unknown model: ${modelInput} -> ${modelId}`, 'WARN');
   }
-  
+
   const provider = modelSpec?.provider || 'anthropic';
-  
+
   // Extract system message (OpenAI format -> Anthropic format)
   const { system, messages: cleanMessages } = extractSystemMessage(messages);
-  
+
   // Auto-truncate if needed
   let finalMessages = cleanMessages;
   if (config.auto_truncate && modelSpec) {
@@ -462,19 +469,33 @@ async function handleChatCompletions(req: Request, res: Response, config: Config
     );
     finalMessages = result.messages;
     if (result.truncated) {
-      log(`Truncated ${cleanMessages.length - finalMessages.length} messages to fit context`);
+      log(`[${requestId}] Truncated ${cleanMessages.length - finalMessages.length} messages to fit context`);
     }
   }
-  
-  log(`Chat: ${modelInput} -> ${modelId} (${provider}), stream=${stream}, messages=${finalMessages.length}`);
-  
+
+  log(`[${requestId}] Chat: ${modelInput} -> ${modelId} (${provider}), stream=${stream}, messages=${finalMessages.length}`);
+
   // Update stats
   proxyStats.requestCount++;
   proxyStats.lastRequestTime = Date.now();
   saveStats();
+
+  // Track response lifecycle
+  res.on('close', () => {
+    log(`[${requestId}] Response closed by client`);
+  });
+
+  res.on('finish', () => {
+    log(`[${requestId}] Response finished successfully`);
+  });
+
+  res.on('error', (err) => {
+    log(`[${requestId}] Response error: ${err.message}`, 'ERROR');
+  });
   
   try {
     if (provider === 'anthropic') {
+      log(`[${requestId}] Routing to Anthropic handler`);
       await handleAnthropicChatWithFallback(res, {
         modelId,
         system,
@@ -482,7 +503,10 @@ async function handleChatCompletions(req: Request, res: Response, config: Config
         stream: stream ?? false,
         maxTokens: max_tokens || modelSpec?.maxTokens || 4096,
         temperature,
-        config
+        config,
+        requestId,
+        tools,
+        tool_choice
       });
 } else if (provider === 'google') {
       // Use @google/genai SDK for global region models (like gemini-3-pro-preview)
@@ -513,16 +537,27 @@ async function handleChatCompletions(req: Request, res: Response, config: Config
       res.status(400).json({ error: `Unsupported provider: ${provider}` });
     }
   } catch (error: any) {
-    log(`Error: ${error.message}`, 'ERROR');
-    
+    log(`[${requestId}] ERROR caught in handleChatCompletions: ${error.message}`, 'ERROR');
+    log(`[${requestId}] Error stack: ${error.stack}`, 'ERROR');
+
+    // If headers already sent (streaming started), we can't send JSON error
+    if (res.headersSent) {
+      log(`[${requestId}] Headers already sent, ending response. Writable: ${res.writable}, Finished: ${res.writableFinished}`, 'WARN');
+      if (res.writable) {
+        res.end();
+      }
+      return;
+    }
+
     // Try fallback if configured
     const fallbacks = config.fallback_chains[modelId];
     if (fallbacks && fallbacks.length > 0) {
-      log(`Trying model fallback: ${fallbacks[0]}`);
+      log(`[${requestId}] Trying model fallback: ${fallbacks[0]}`);
       req.body.model = fallbacks[0];
       return handleChatCompletions(req, res, config);
     }
-    
+
+    log(`[${requestId}] Sending error response`);
     res.status(500).json({
       error: {
         message: error.message,
@@ -542,16 +577,22 @@ async function handleAnthropicChatWithFallback(res: Response, options: {
   temperature?: number;
   config: Config;
   modelRegion?: string;
+  requestId?: string;
+  tools?: any[];
+  tool_choice?: any;
 }) {
-  const { modelId, config } = options;
+  const { modelId, config, requestId = 'unknown' } = options;
   const regions = getRegionFallbackOrder(modelId);
-  
+
+  log(`[${requestId}] Starting region fallback, available regions: ${regions.join(', ')}`);
+
   let lastError: any = null;
-  
+
   for (const region of regions) {
     try {
-      log(`Trying region: ${region} for model ${modelId}`);
-      await handleAnthropicChat(res, { ...options, region });
+      log(`[${requestId}] Trying region: ${region} for model ${modelId}`);
+      await handleAnthropicChat(res, { ...options, region, requestId });
+      log(`[${requestId}] Region ${region} succeeded`);
       return; // Success, exit
     } catch (error: any) {
       lastError = error;
@@ -588,8 +629,13 @@ async function handleAnthropicChat(res: Response, options: {
   config: Config;
   modelRegion?: string;
   region?: string;
+  requestId?: string;
+  tools?: any[];
+  tool_choice?: any;
 }) {
-  const { modelId, system, messages, stream, maxTokens, temperature, config, region } = options;
+  const { modelId, system, messages, stream, maxTokens, temperature, config, region, requestId = 'unknown', tools, tool_choice } = options;
+
+  log(`[${requestId}] handleAnthropicChat: stream=${stream}, region=${region || config.default_region}`);
   
   // Get access token via google-auth-library
   const auth = new GoogleAuth({ scopes: 'https://www.googleapis.com/auth/cloud-platform' });
@@ -602,33 +648,125 @@ async function handleAnthropicChat(res: Response, options: {
   const url = `https://${useRegion}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${useRegion}/publishers/anthropic/models/${modelId}:${stream ? 'streamRawPredict' : 'rawPredict'}`;
   
   // Convert messages to Anthropic format
-  const anthropicMessages = messages.map(msg => ({
-    role: msg.role as 'user' | 'assistant',
-    content: msg.content
-  }));
+  const anthropicMessages: any[] = [];
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+
+    // Handle tool messages (OpenAI format) -> convert to user message with tool_result
+    if (msg.role === 'tool' || msg.tool_call_id) {
+      // Find the corresponding assistant message with tool use
+      const content: any[] = [];
+
+      if (typeof msg.content === 'string') {
+        content.push({
+          type: 'tool_result',
+          tool_use_id: msg.tool_call_id || 'unknown',
+          content: msg.content
+        });
+      }
+
+      anthropicMessages.push({
+        role: 'user',
+        content
+      });
+    } else if (msg.role === 'assistant' && msg.tool_calls) {
+      // Assistant message with tool calls -> convert to tool_use content blocks
+      const content: any[] = [];
+
+      // Add text content if any
+      if (typeof msg.content === 'string' && msg.content) {
+        content.push({
+          type: 'text',
+          text: msg.content
+        });
+      }
+
+      // Add tool use blocks
+      for (const toolCall of msg.tool_calls) {
+        content.push({
+          type: 'tool_use',
+          id: toolCall.id,
+          name: toolCall.function.name,
+          input: JSON.parse(toolCall.function.arguments || '{}')
+        });
+      }
+
+      anthropicMessages.push({
+        role: 'assistant',
+        content
+      });
+    } else {
+      // Regular message
+      anthropicMessages.push({
+        role: msg.role as 'user' | 'assistant',
+        content: msg.content
+      });
+    }
+  }
   
   const requestBody: any = {
     anthropic_version: 'vertex-2023-10-16',
     max_tokens: maxTokens,
     messages: anthropicMessages
   };
-  
+
   if (system) {
     requestBody.system = system;
   }
-  
+
   if (temperature !== undefined) {
     requestBody.temperature = temperature;
   }
+
+  // Convert OpenAI-format tools to Claude's custom tool format
+  if (tools && tools.length > 0) {
+    const claudeTools = tools.map((tool: any) => {
+      if (tool.type === 'function') {
+        // Convert OpenAI function tool to Claude custom tool
+        return {
+          type: 'custom',
+          name: tool.function.name,
+          description: tool.function.description || '',
+          input_schema: tool.function.parameters || {
+            type: 'object',
+            properties: {},
+            required: []
+          }
+        };
+      }
+      // If already in Claude format, pass through
+      return tool;
+    });
+
+    requestBody.tools = claudeTools;
+  }
+
+  if (tool_choice) {
+    // Convert OpenAI tool_choice to Claude format if needed
+    if (typeof tool_choice === 'object' && tool_choice.type === 'function') {
+      requestBody.tool_choice = {
+        type: 'tool',
+        name: tool_choice.function?.name
+      };
+    } else if (tool_choice === 'auto' || tool_choice === 'none') {
+      requestBody.tool_choice = { type: tool_choice };
+    } else {
+      requestBody.tool_choice = tool_choice;
+    }
+  }
+
   
   if (stream) {
     requestBody.stream = true;
-    
+
+    log(`[${requestId}] Setting up streaming response`);
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
-    
+
+    log(`[${requestId}] Sending streaming request to Vertex AI: ${url}`);
     const response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -637,20 +775,25 @@ async function handleAnthropicChat(res: Response, options: {
       },
       body: JSON.stringify(requestBody)
     });
-    
+
     if (!response.ok) {
       const errorText = await response.text();
+      log(`[${requestId}] Vertex AI error response: ${response.status} ${errorText}`, 'ERROR');
       throw { status: response.status, message: errorText };
     }
-    
+
+    log(`[${requestId}] Vertex AI responded OK, starting stream`);
     const reader = response.body?.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
     const completionId = `chatcmpl-${Date.now()}`;
-    
+    let chunkCount = 0;
+    let receivedMessageStop = false;
+
     if (reader) {
       try {
         // Send initial role chunk
+        log(`[${requestId}] Sending initial role chunk`);
         res.write(`data: ${JSON.stringify({
           id: completionId,
           object: 'chat.completion.chunk',
@@ -658,10 +801,13 @@ async function handleAnthropicChat(res: Response, options: {
           model: modelId,
           choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }]
         })}\n\n`);
-        
+
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          log(`[${requestId}] Stream ended, total chunks: ${chunkCount}`);
+          break;
+        }
         
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
@@ -671,11 +817,58 @@ async function handleAnthropicChat(res: Response, options: {
           if (line.startsWith('data: ')) {
             const data = line.slice(6).trim();
             if (!data || data === '[DONE]') continue;
-            
+
             try {
               const event = JSON.parse(data);
-              
-              if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+
+              // Handle tool use events
+              if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
+                chunkCount++;
+                const chunk = {
+                  id: completionId,
+                  object: 'chat.completion.chunk',
+                  created: Math.floor(Date.now() / 1000),
+                  model: modelId,
+                  choices: [{
+                    index: 0,
+                    delta: {
+                      tool_calls: [{
+                        index: 0,
+                        id: event.content_block.id,
+                        type: 'function',
+                        function: {
+                          name: event.content_block.name,
+                          arguments: ''
+                        }
+                      }]
+                    },
+                    finish_reason: null
+                  }]
+                };
+                res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+              } else if (event.type === 'content_block_delta' && event.delta?.type === 'input_json_delta') {
+                chunkCount++;
+                const chunk = {
+                  id: completionId,
+                  object: 'chat.completion.chunk',
+                  created: Math.floor(Date.now() / 1000),
+                  model: modelId,
+                  choices: [{
+                    index: 0,
+                    delta: {
+                      tool_calls: [{
+                        index: 0,
+                        function: {
+                          arguments: event.delta.partial_json
+                        }
+                      }]
+                    },
+                    finish_reason: null
+                  }]
+                };
+                res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+              } else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+                chunkCount++;
                 const chunk = {
                   id: completionId,
                   object: 'chat.completion.chunk',
@@ -687,20 +880,13 @@ async function handleAnthropicChat(res: Response, options: {
                     finish_reason: null
                   }]
                 };
-                res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+                const writeSuccess = res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+                if (!writeSuccess) {
+                  log(`[${requestId}] Backpressure detected on chunk ${chunkCount}`, 'WARN');
+                }
               } else if (event.type === 'message_stop') {
-                const chunk = {
-                  id: completionId,
-                  object: 'chat.completion.chunk',
-                  created: Math.floor(Date.now() / 1000),
-                  model: modelId,
-                  choices: [{
-                    index: 0,
-                    delta: {},
-                    finish_reason: 'stop'
-                  }]
-                };
-                res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+                log(`[${requestId}] Received message_stop event`);
+                receivedMessageStop = true;
               }
             } catch (e) {
               // skip non-JSON lines
@@ -709,12 +895,19 @@ async function handleAnthropicChat(res: Response, options: {
         }
       }
       } catch (streamError: any) {
-        log(`Streaming error: ${streamError.message}`, 'ERROR');
-        throw streamError;
+        log(`[${requestId}] Streaming error: ${streamError.message}`, 'ERROR');
+        log(`[${requestId}] Headers sent: ${res.headersSent}, Writable: ${res.writable}`, 'ERROR');
+        // Don't re-throw if headers already sent - just end the stream
+        if (!res.headersSent) {
+          throw streamError;
+        }
+        res.end();
+        return;
       }
     }
-    
+
     // Process any remaining data in buffer
+    log(`[${requestId}] Processing remaining buffer (${buffer.length} bytes)`);
     if (buffer.trim()) {
       const line = buffer.trim();
       if (line.startsWith('data: ')) {
@@ -736,18 +929,8 @@ async function handleAnthropicChat(res: Response, options: {
               };
               res.write(`data: ${JSON.stringify(chunk)}\n\n`);
             } else if (event.type === 'message_stop') {
-              const chunk = {
-                id: completionId,
-                object: 'chat.completion.chunk',
-                created: Math.floor(Date.now() / 1000),
-                model: modelId,
-                choices: [{
-                  index: 0,
-                  delta: {},
-                  finish_reason: 'stop'
-                }]
-              };
-              res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+              log(`[${requestId}] Received message_stop event in buffer`);
+              receivedMessageStop = true;
             }
           } catch (e) {
             // skip non-JSON
@@ -757,6 +940,7 @@ async function handleAnthropicChat(res: Response, options: {
     }
     
     // Send final stop chunk before [DONE]
+    log(`[${requestId}] Sending final stop chunk`);
     const stopChunk = {
       id: completionId,
       object: 'chat.completion.chunk',
@@ -765,9 +949,11 @@ async function handleAnthropicChat(res: Response, options: {
       choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
     };
     res.write(`data: ${JSON.stringify(stopChunk)}\n\n`);
-    
+
+    log(`[${requestId}] Sending [DONE] and ending stream`);
     res.write('data: [DONE]\n\n');
     res.end();
+    log(`[${requestId}] Stream ended successfully, writable=${res.writable}, finished=${res.writableFinished}`);
   } else {
     // Non-streaming response
     const response = await fetch(url, {
@@ -851,41 +1037,62 @@ async function handleGeminiChat(res: Response, options: {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
-    
-    const result = await model.generateContentStream({ contents });
-    
-    for await (const chunk of result.stream) {
-      const text = chunk.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      if (text) {
-        const openaiChunk = {
-          id: `chatcmpl-${Date.now()}`,
-          object: 'chat.completion.chunk',
-          created: Math.floor(Date.now() / 1000),
-          model: modelId,
-          choices: [{
-            index: 0,
-            delta: { content: text },
-            finish_reason: null
-          }]
-        };
-        res.write(`data: ${JSON.stringify(openaiChunk)}\n\n`);
+
+    const completionId = `chatcmpl-${Date.now()}`;
+
+    try {
+      // Send initial role chunk
+      res.write(`data: ${JSON.stringify({
+        id: completionId,
+        object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000),
+        model: modelId,
+        choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }]
+      })}\n\n`);
+
+      const result = await model.generateContentStream({ contents });
+
+      for await (const chunk of result.stream) {
+        const text = chunk.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        if (text) {
+          const openaiChunk = {
+            id: completionId,
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: modelId,
+            choices: [{
+              index: 0,
+              delta: { content: text },
+              finish_reason: null
+            }]
+          };
+          res.write(`data: ${JSON.stringify(openaiChunk)}\n\n`);
+        }
       }
+
+      const finalChunk = {
+        id: completionId,
+        object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000),
+        model: modelId,
+        choices: [{
+          index: 0,
+          delta: {},
+          finish_reason: 'stop'
+        }]
+      };
+      res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+    } catch (streamError: any) {
+      log(`Gemini streaming error: ${streamError.message}`, 'ERROR');
+      // Don't re-throw if headers already sent - just end the stream
+      if (!res.headersSent) {
+        throw streamError;
+      }
+      res.end();
+      return;
     }
-    
-    const finalChunk = {
-      id: `chatcmpl-${Date.now()}`,
-      object: 'chat.completion.chunk',
-      created: Math.floor(Date.now() / 1000),
-      model: modelId,
-      choices: [{
-        index: 0,
-        delta: {},
-        finish_reason: 'stop'
-      }]
-    };
-    res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
-    res.write('data: [DONE]\n\n');
-    res.end();
   } else {
     const result = await model.generateContent({ contents });
     const response = result.response;
@@ -1002,37 +1209,68 @@ async function handleGenAIChat(res: Response, options: {
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
-    
-    const response = await ai.models.generateContentStream({
-      model: modelId,
-      contents,
-      config: {
-        maxOutputTokens: maxTokens,
-        temperature,
-        systemInstruction: system || undefined
+    res.setHeader("X-Accel-Buffering", "no");
+
+    const completionId = `chatcmpl-${Date.now()}`;
+
+    try {
+      // Send initial role chunk
+      res.write(`data: ${JSON.stringify({
+        id: completionId,
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model: modelId,
+        choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }]
+      })}\n\n`);
+
+      const response = await ai.models.generateContentStream({
+        model: modelId,
+        contents,
+        config: {
+          maxOutputTokens: maxTokens,
+          temperature,
+          systemInstruction: system || undefined
+        }
+      });
+
+      for await (const chunk of response) {
+        const text = chunk.text || "";
+        if (text) {
+          const openaiChunk = {
+            id: completionId,
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model: modelId,
+            choices: [{
+              index: 0,
+              delta: { content: text },
+              finish_reason: null
+            }]
+          };
+          res.write(`data: ${JSON.stringify(openaiChunk)}\n\n`);
+        }
       }
-    });
-    
-    for await (const chunk of response) {
-      const text = chunk.text || "";
-      if (text) {
-        const openaiChunk = {
-          id: `chatcmpl-${Date.now()}`,
-          object: "chat.completion.chunk",
-          created: Math.floor(Date.now() / 1000),
-          model: modelId,
-          choices: [{
-            index: 0,
-            delta: { content: text },
-            finish_reason: null
-          }]
-        };
-        res.write(`data: ${JSON.stringify(openaiChunk)}\n\n`);
+
+      // Send final stop chunk before [DONE]
+      const stopChunk = {
+        id: completionId,
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model: modelId,
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }]
+      };
+      res.write(`data: ${JSON.stringify(stopChunk)}\n\n`);
+
+      res.write(`data: [DONE]\n\n`);
+      res.end();
+    } catch (streamError: any) {
+      log(`GenAI streaming error: ${streamError.message}`, 'ERROR');
+      // Don't re-throw - headers already sent, just end the stream
+      if (!res.headersSent) {
+        throw streamError;
       }
+      res.end();
     }
-    
-    res.write(`data: [DONE]\n\n`);
-    res.end();
   } else {
     const response = await ai.models.generateContent({
       model: modelId,
@@ -1410,6 +1648,316 @@ async function handleImageGeneration(req: Request, res: Response, config: Config
 }
 
 // ============================================================================
+// Completions Handler (Legacy OpenAI API)
+// ============================================================================
+
+async function handleCompletions(req: Request, res: Response, config: Config) {
+  const requestId = `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  const { model: modelInput, prompt, stream, max_tokens, temperature, stop } = req.body;
+
+  log(`[${requestId}] ====== NEW COMPLETIONS REQUEST ======`);
+  log(`[${requestId}] Model: ${modelInput}, Stream: ${stream}, Prompt length: ${prompt?.length}`);
+
+  // Convert prompt to messages format
+  const messages: ChatMessage[] = [{
+    role: 'user',
+    content: typeof prompt === 'string' ? prompt : JSON.stringify(prompt)
+  }];
+
+  // Resolve model alias
+  const modelId = resolveModel(modelInput, config);
+  const modelSpec = getModelSpec(modelId);
+
+  if (!modelSpec) {
+    log(`[${requestId}] Unknown model: ${modelInput} -> ${modelId}`, 'WARN');
+  }
+
+  const provider = modelSpec?.provider || 'anthropic';
+
+  log(`[${requestId}] Completions: ${modelInput} -> ${modelId} (${provider}), stream=${stream}`);
+
+  // Update stats
+  proxyStats.requestCount++;
+  proxyStats.lastRequestTime = Date.now();
+  saveStats();
+
+  // Track response lifecycle
+  res.on('close', () => {
+    log(`[${requestId}] Response closed by client`);
+  });
+
+  res.on('finish', () => {
+    log(`[${requestId}] Response finished successfully`);
+  });
+
+  res.on('error', (err) => {
+    log(`[${requestId}] Response error: ${err.message}`, 'ERROR');
+  });
+
+  try {
+    if (provider === 'anthropic') {
+      log(`[${requestId}] Routing to Anthropic handler for completions`);
+
+      // Use handleAnthropicChatWithFallback but wrap the response
+      await handleAnthropicCompletions(res, {
+        modelId,
+        system: null,
+        messages,
+        stream: stream ?? false,
+        maxTokens: max_tokens || modelSpec?.maxTokens || 4096,
+        temperature,
+        config,
+        requestId,
+        stop
+      });
+    } else {
+      res.status(400).json({ error: `Unsupported provider for completions: ${provider}` });
+    }
+  } catch (error: any) {
+    log(`[${requestId}] ERROR caught in handleCompletions: ${error.message}`, 'ERROR');
+
+    // If headers already sent (streaming started), we can't send JSON error
+    if (res.headersSent) {
+      log(`[${requestId}] Headers already sent, ending response`, 'WARN');
+      if (res.writable) {
+        res.end();
+      }
+      return;
+    }
+
+    res.status(500).json({
+      error: {
+        message: error.message,
+        type: 'proxy_error',
+        code: error.status || 500
+      }
+    });
+  }
+}
+
+async function handleAnthropicCompletions(res: Response, options: {
+  modelId: string;
+  system: string | null;
+  messages: ChatMessage[];
+  stream: boolean;
+  maxTokens: number;
+  temperature?: number;
+  config: Config;
+  requestId?: string;
+  stop?: string | string[];
+}) {
+  const { modelId, system, messages, stream, maxTokens, temperature, config, requestId = 'unknown', stop } = options;
+  const regions = getRegionFallbackOrder(modelId);
+
+  log(`[${requestId}] Starting completions region fallback`);
+
+  let lastError: any = null;
+
+  for (const region of regions) {
+    try {
+      log(`[${requestId}] Trying region: ${region} for completions`);
+
+      const auth = new GoogleAuth({ scopes: 'https://www.googleapis.com/auth/cloud-platform' });
+      const client = await auth.getClient();
+      const tokenResponse = await client.getAccessToken();
+      const accessToken = tokenResponse.token;
+
+      const useRegion = region || config.default_region;
+      const projectId = config.project_id;
+      const url = `https://${useRegion}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${useRegion}/publishers/anthropic/models/${modelId}:${stream ? 'streamRawPredict' : 'rawPredict'}`;
+
+      const anthropicMessages = messages.map(msg => ({
+        role: msg.role as 'user' | 'assistant',
+        content: msg.content
+      }));
+
+      const requestBody: any = {
+        anthropic_version: 'vertex-2023-10-16',
+        max_tokens: maxTokens,
+        messages: anthropicMessages
+      };
+
+      if (system) {
+        requestBody.system = system;
+      }
+
+      if (temperature !== undefined) {
+        requestBody.temperature = temperature;
+      }
+
+      if (stop) {
+        requestBody.stop_sequences = Array.isArray(stop) ? stop : [stop];
+      }
+
+      if (stream) {
+        requestBody.stream = true;
+
+        log(`[${requestId}] Setting up completions streaming response`);
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(requestBody)
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          log(`[${requestId}] Vertex AI error: ${response.status} ${errorText}`, 'ERROR');
+          throw { status: response.status, message: errorText };
+        }
+
+        log(`[${requestId}] Vertex AI responded OK, starting completions stream`);
+        const reader = response.body?.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        const completionId = `cmpl-${Date.now()}`;
+        let chunkCount = 0;
+
+        if (reader) {
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) {
+                log(`[${requestId}] Completions stream ended, total chunks: ${chunkCount}`);
+                break;
+              }
+
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split('\n');
+              buffer = lines.pop() || '';
+
+              for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                  const data = line.slice(6).trim();
+                  if (!data || data === '[DONE]') continue;
+
+                  try {
+                    const event = JSON.parse(data);
+
+                    if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+                      chunkCount++;
+                      const chunk = {
+                        id: completionId,
+                        object: 'text_completion',
+                        created: Math.floor(Date.now() / 1000),
+                        model: modelId,
+                        choices: [{
+                          text: event.delta.text,
+                          index: 0,
+                          logprobs: null,
+                          finish_reason: null
+                        }]
+                      };
+                      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+                    } else if (event.type === 'message_stop') {
+                      log(`[${requestId}] Received message_stop in completions`);
+                    }
+                  } catch (e) {
+                    // skip non-JSON lines
+                  }
+                }
+              }
+            }
+          } catch (streamError: any) {
+            log(`[${requestId}] Completions streaming error: ${streamError.message}`, 'ERROR');
+            if (!res.headersSent) {
+              throw streamError;
+            }
+            res.end();
+            return;
+          }
+        }
+
+        // Send final chunk
+        log(`[${requestId}] Sending completions final chunk`);
+        const finalChunk = {
+          id: completionId,
+          object: 'text_completion',
+          created: Math.floor(Date.now() / 1000),
+          model: modelId,
+          choices: [{
+            text: '',
+            index: 0,
+            logprobs: null,
+            finish_reason: 'stop'
+          }]
+        };
+        res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
+        log(`[${requestId}] Completions stream ended successfully`);
+
+      } else {
+        // Non-streaming
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(requestBody)
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw { status: response.status, message: errorText };
+        }
+
+        const data = await response.json() as any;
+
+        const text = (data.content || [])
+          .filter((block: any) => block.type === 'text')
+          .map((block: any) => block.text)
+          .join('');
+
+        res.json({
+          id: `cmpl-${Date.now()}`,
+          object: 'text_completion',
+          created: Math.floor(Date.now() / 1000),
+          model: modelId,
+          choices: [{
+            text,
+            index: 0,
+            logprobs: null,
+            finish_reason: 'stop'
+          }],
+          usage: {
+            prompt_tokens: data.usage?.input_tokens || 0,
+            completion_tokens: data.usage?.output_tokens || 0,
+            total_tokens: (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0)
+          }
+        });
+      }
+
+      return; // Success
+    } catch (error: any) {
+      lastError = error;
+      log(`[${requestId}] Region ${region} failed for completions: ${error.message}`, 'WARN');
+
+      const shouldRetry =
+        error.status === 429 ||
+        error.status === 503 ||
+        error.status === 500 ||
+        error.message?.includes('capacity') ||
+        error.message?.includes('overloaded');
+
+      if (!shouldRetry) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError || new Error('All regions failed for completions');
+}
+
+// ============================================================================
 // Server Setup
 // ============================================================================
 
@@ -1439,10 +1987,20 @@ export async function startProxy(daemonMode = false) {
   // Logging middleware
   app.use((req, res, next) => {
     const start = Date.now();
+    const reqId = `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+    log(`[${reqId}] >>>>>> ${req.method} ${req.path}`);
+
     res.on('finish', () => {
       const duration = Date.now() - start;
-      log(`${req.method} ${req.path} ${res.statusCode} ${duration}ms`);
+      log(`[${reqId}] <<<<<< ${req.method} ${req.path} ${res.statusCode} ${duration}ms [FINISH]`);
     });
+
+    res.on('close', () => {
+      const duration = Date.now() - start;
+      log(`[${reqId}] <<<<<< ${req.method} ${req.path} ${duration}ms [CLOSE]`);
+    });
+
     next();
   });
   
@@ -1463,6 +2021,7 @@ export async function startProxy(daemonMode = false) {
       endpoints: {
         models: '/v1/models',
         chat: '/v1/chat/completions',
+        completions: '/v1/completions',
         messages: '/v1/messages',
         images: '/v1/images/generations'
       }
@@ -1478,9 +2037,11 @@ export async function startProxy(daemonMode = false) {
   });
   
   app.get('/v1/models', (req, res) => handleModels(req, res, config));
-  
+
   app.post('/v1/chat/completions', (req, res) => handleChatCompletions(req, res, config));
-  
+
+  app.post('/v1/completions', (req, res) => handleCompletions(req, res, config));
+
   app.post('/v1/messages', (req, res) => handleAnthropicMessages(req, res, config));
   app.post('/messages', (req, res) => handleAnthropicMessages(req, res, config));
   
@@ -1502,6 +2063,7 @@ export async function startProxy(daemonMode = false) {
 ║  Endpoints:                                              ║
 ║    GET  /v1/models              List models              ║
 ║    POST /v1/chat/completions    OpenAI chat format       ║
+║    POST /v1/completions         OpenAI completions       ║
 ║    POST /v1/messages            Anthropic format         ║
 ║    POST /v1/images/generations  Image generation         ║
 ╠══════════════════════════════════════════════════════════╣
