@@ -153,15 +153,15 @@ export const MODEL_CATALOG: Record<string, ModelSpec> = {
     capabilities: ['text', 'vision', 'tools']
   },
   // Gemini Models
-  'gemini-3-pro': {
-    id: 'gemini-3-pro',
+  'gemini-3-pro-preview': {
+    id: 'gemini-3-pro-preview',
     name: 'Gemini 3 Pro',
     provider: 'google',
     contextWindow: 1000000,
     maxTokens: 8192,
     inputPrice: 2.5,
     outputPrice: 15,
-    regions: ['us-central1', 'europe-west4'],
+    regions: ['global'],
     capabilities: ['text', 'vision', 'audio', 'video']
   },
   'gemini-2.5-pro': {
@@ -476,7 +476,8 @@ async function handleChatCompletions(req: Request, res: Response, config: Config
         stream: stream ?? false,
         maxTokens: max_tokens || modelSpec?.maxTokens || 4096,
         temperature,
-        config
+        config,
+        modelRegion: modelSpec?.regions?.[0]
       });
     } else {
       res.status(400).json({ error: `Unsupported provider: ${provider}` });
@@ -510,6 +511,7 @@ async function handleAnthropicChatWithFallback(res: Response, options: {
   maxTokens: number;
   temperature?: number;
   config: Config;
+  modelRegion?: string;
 }) {
   const { modelId, config } = options;
   const regions = getRegionFallbackOrder(modelId);
@@ -554,6 +556,7 @@ async function handleAnthropicChat(res: Response, options: {
   maxTokens: number;
   temperature?: number;
   config: Config;
+  modelRegion?: string;
   region?: string;
 }) {
   const { modelId, system, messages, stream, maxTokens, temperature, config, region } = options;
@@ -721,12 +724,13 @@ async function handleGeminiChat(res: Response, options: {
   maxTokens: number;
   temperature?: number;
   config: Config;
+  modelRegion?: string;
 }) {
-  const { modelId, system, messages, stream, maxTokens, temperature, config } = options;
+  const { modelId, system, messages, stream, maxTokens, temperature, config, modelRegion } = options;
   
   const vertexAI = new VertexAI({
     project: config.project_id,
-    location: config.google_region
+    location: modelRegion || config.google_region
   });
   
   const model = vertexAI.getGenerativeModel({
