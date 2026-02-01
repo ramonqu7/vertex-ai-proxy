@@ -27,30 +27,31 @@ A proxy server that lets you use **Google Vertex AI models** (Claude, Gemini, Im
 
 ## Quick Start
 
-### Option 1: NPX (Recommended)
-
-```bash
-# Run directly without installation
-npx vertex-ai-proxy
-
-# Or start as daemon
-npx vertex-ai-proxy start --project your-gcp-project
-```
-
-### Option 2: Global Install
+### 1. Install
 
 ```bash
 npm install -g vertex-ai-proxy
-vertex-ai-proxy --project your-gcp-project
 ```
 
-### Option 3: From Source
+### 2. Setup Google Cloud
 
 ```bash
-git clone https://github.com/anthropics/vertex-ai-proxy.git
-cd vertex-ai-proxy
-npm install
-npm start
+# Authenticate
+gcloud auth application-default login
+
+# Set your project & enable Vertex AI
+gcloud config set project YOUR_PROJECT_ID
+gcloud services enable aiplatform.googleapis.com
+```
+
+### 3. Run
+
+```bash
+# Start the proxy
+vertex-ai-proxy start --project YOUR_PROJECT_ID
+
+# Check status
+vertex-ai-proxy status
 ```
 
 ## CLI Commands
@@ -144,56 +145,10 @@ vertex-ai-proxy install-service             # System service (requires sudo)
 
 ## Prerequisites
 
-### 1. Google Cloud Setup
+- **Google Cloud CLI**: [Install here](https://cloud.google.com/sdk/docs/install)
+- **GCP Project** with Vertex AI enabled
+- **Claude Access**: Enable in [Model Garden](https://console.cloud.google.com/vertex-ai/model-garden) (search "Claude" → click Enable)
 
-You need a GCP project with Vertex AI enabled:
-
-```bash
-# Install Google Cloud CLI (if not already installed)
-# macOS
-brew install google-cloud-sdk
-
-# Ubuntu/Debian
-curl https://sdk.cloud.google.com | bash
-
-# Authenticate
-gcloud auth login
-gcloud auth application-default login
-
-# Set your project
-gcloud config set project YOUR_PROJECT_ID
-
-# Enable Vertex AI API
-gcloud services enable aiplatform.googleapis.com
-```
-
-### 2. Claude on Vertex AI Access
-
-Claude models require approval. Request access in the [Vertex AI Model Garden](https://console.cloud.google.com/vertex-ai/model-garden):
-
-1. Go to Model Garden
-2. Search for "Claude"
-3. Click "Enable" on the models you want
-4. Wait for approval (usually instant for Haiku/Sonnet, may take longer for Opus)
-
-### 3. Supported Regions
-
-| Models | Regions |
-|--------|---------|
-| Claude | `us-east5`, `europe-west1` |
-| Gemini | `us-central1`, `europe-west4` |
-| Imagen | `us-central1` |
-
-## Dynamic Region Fallback
-
-The proxy automatically handles region failures by trying regions in this order:
-
-1. **us-east5** (primary for Claude)
-2. **us-central1** (global, primary for Gemini/Imagen)
-3. **europe-west1** (EU fallback for Claude)
-4. Other model-specific regions
-
-This means if `us-east5` is overloaded or has capacity issues, the proxy automatically retries in other available regions for that model.
 
 ## Configuration
 

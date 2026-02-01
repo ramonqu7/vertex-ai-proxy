@@ -633,11 +633,16 @@ async function killDaemon() {
 
 async function showStatus() {
   console.log(chalk.blue.bold('\n📊 Vertex AI Proxy Status\n'));
-  
+
   const pid = getPid();
   const stats = loadStats();
   const config = loadConfig();
-  
+
+  // Version
+  console.log(chalk.cyan('Version:'));
+  console.log(`  ${VERSION}`);
+  console.log();
+
   // Process status
   console.log(chalk.cyan('Process:'));
   if (pid && isRunning(pid)) {
