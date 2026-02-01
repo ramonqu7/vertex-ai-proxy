@@ -627,6 +627,7 @@ async function handleAnthropicChat(res: Response, options: {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
     
     const response = await fetch(url, {
       method: 'POST',
@@ -645,8 +646,19 @@ async function handleAnthropicChat(res: Response, options: {
     const reader = response.body?.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    const completionId = `chatcmpl-${Date.now()}`;
     
     if (reader) {
+      try {
+        // Send initial role chunk
+        res.write(`data: ${JSON.stringify({
+          id: completionId,
+          object: 'chat.completion.chunk',
+          created: Math.floor(Date.now() / 1000),
+          model: modelId,
+          choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }]
+        })}\n\n`);
+        
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -665,7 +677,7 @@ async function handleAnthropicChat(res: Response, options: {
               
               if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
                 const chunk = {
-                  id: `chatcmpl-${Date.now()}`,
+                  id: completionId,
                   object: 'chat.completion.chunk',
                   created: Math.floor(Date.now() / 1000),
                   model: modelId,
@@ -678,7 +690,7 @@ async function handleAnthropicChat(res: Response, options: {
                 res.write(`data: ${JSON.stringify(chunk)}\n\n`);
               } else if (event.type === 'message_stop') {
                 const chunk = {
-                  id: `chatcmpl-${Date.now()}`,
+                  id: completionId,
                   object: 'chat.completion.chunk',
                   created: Math.floor(Date.now() / 1000),
                   model: modelId,
@@ -696,6 +708,10 @@ async function handleAnthropicChat(res: Response, options: {
           }
         }
       }
+      } catch (streamError: any) {
+        log(`Streaming error: ${streamError.message}`, 'ERROR');
+        throw streamError;
+      }
     }
     
     // Process any remaining data in buffer
@@ -708,7 +724,7 @@ async function handleAnthropicChat(res: Response, options: {
             const event = JSON.parse(data);
             if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
               const chunk = {
-                id: `chatcmpl-${Date.now()}`,
+                id: completionId,
                 object: 'chat.completion.chunk',
                 created: Math.floor(Date.now() / 1000),
                 model: modelId,
@@ -721,7 +737,7 @@ async function handleAnthropicChat(res: Response, options: {
               res.write(`data: ${JSON.stringify(chunk)}\n\n`);
             } else if (event.type === 'message_stop') {
               const chunk = {
-                id: `chatcmpl-${Date.now()}`,
+                id: completionId,
                 object: 'chat.completion.chunk',
                 created: Math.floor(Date.now() / 1000),
                 model: modelId,
@@ -739,6 +755,16 @@ async function handleAnthropicChat(res: Response, options: {
         }
       }
     }
+    
+    // Send final stop chunk before [DONE]
+    const stopChunk = {
+      id: completionId,
+      object: 'chat.completion.chunk',
+      created: Math.floor(Date.now() / 1000),
+      model: modelId,
+      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
+    };
+    res.write(`data: ${JSON.stringify(stopChunk)}\n\n`);
     
     res.write('data: [DONE]\n\n');
     res.end();
@@ -824,6 +850,7 @@ async function handleGeminiChat(res: Response, options: {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
     
     const result = await model.generateContentStream({ contents });
     
@@ -1158,6 +1185,7 @@ async function handleAnthropicMessages(req: Request, res: Response, config: Conf
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
         
         const reader = response.body?.getReader();
         const decoder = new TextDecoder();
