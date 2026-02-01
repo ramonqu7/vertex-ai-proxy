@@ -24,6 +24,7 @@
  *   vertex-ai-proxy install-service       Install as systemd service
  */
 
+import { fileURLToPath } from 'url';
 import { Command } from 'commander';
 import chalk from 'chalk';
 import ora from 'ora';
@@ -418,8 +419,8 @@ async function startDaemon(options: any) {
   ensureDataDir();
   
   // Build the command to run
-  const distPath = path.join(path.dirname(process.argv[1]), '..', 'dist', 'index.js');
-  const srcPath = path.join(path.dirname(process.argv[1]), '..', 'src', 'index.js');
+  const distPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'index.js');
+  const srcPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'index.js');
   let serverPath = fs.existsSync(distPath) ? distPath : srcPath;
   
   // Spawn detached process
@@ -1314,8 +1315,8 @@ async function startServer(options: any) {
   try {
     // Try dist first, then src for dev
     let serverModule;
-    const distPath = path.join(path.dirname(process.argv[1]), '..', 'dist', 'index.js');
-    const srcPath = path.join(path.dirname(process.argv[1]), '..', 'src', 'index.js');
+    const distPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'index.js');
+    const srcPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'index.js');
     
     try {
       serverModule = await import(distPath);
