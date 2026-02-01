@@ -698,48 +698,6 @@ async function handleAnthropicChat(res: Response, options: {
       }
     }
     
-    // Process any remaining data in buffer
-    if (buffer.trim()) {
-      const line = buffer.trim();
-      if (line.startsWith('data: ')) {
-        const data = line.slice(6).trim();
-        if (data && data !== '[DONE]') {
-          try {
-            const event = JSON.parse(data);
-            if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
-              const chunk = {
-                id: `chatcmpl-${Date.now()}`,
-                object: 'chat.completion.chunk',
-                created: Math.floor(Date.now() / 1000),
-                model: modelId,
-                choices: [{
-                  index: 0,
-                  delta: { content: event.delta.text },
-                  finish_reason: null
-                }]
-              };
-              res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-            } else if (event.type === 'message_stop') {
-              const chunk = {
-                id: `chatcmpl-${Date.now()}`,
-                object: 'chat.completion.chunk',
-                created: Math.floor(Date.now() / 1000),
-                model: modelId,
-                choices: [{
-                  index: 0,
-                  delta: {},
-                  finish_reason: 'stop'
-                }]
-              };
-              res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-            }
-          } catch (e) {
-            // skip non-JSON
-          }
-        }
-      }
-    }
-    
     res.write('data: [DONE]\n\n');
     res.end();
   } else {
