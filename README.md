@@ -1,98 +1,437 @@
-# vertex-ai-proxy
+# Vertex AI Proxy for OpenClaw & Clawdbot
 
-OpenAI-compatible proxy for Google Vertex AI, supporting **Claude** and **Gemini** models with automatic failover, retries, and prompt caching.
-
-[![npm version](https://badge.fury.io/js/vertex-ai-proxy.svg)](https://www.npmjs.com/package/vertex-ai-proxy)
+[![npm version](https://badge.fury.io/js/vertex-ai-proxy.svg)](https://badge.fury.io/js/vertex-ai-proxy)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+A proxy server that lets you use **Google Vertex AI models** (Claude, Gemini, Imagen) with [OpenClaw](https://github.com/openclaw/openclaw), [Clawdbot](https://github.com/clawdbot/clawdbot), and other OpenAI-compatible tools.
+
+```
+┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│  OpenClaw   │────▶│  Vertex Proxy    │────▶│  Vertex AI API  │
+│  Clawdbot   │◀────│  (This Server)   │◀────│  Claude/Gemini  │
+└─────────────┘     └──────────────────┘     └─────────────────┘
+```
 
 ## Features
 
-- 🔄 **Automatic Region Failover** - Seamlessly switches between regions on rate limits (429)
-- 🔁 **Smart Retries** - Exponential backoff with jitter for transient errors
-- 💰 **Prompt Caching** - Reduces costs up to 90% for repeated system prompts (Claude)
-- 📊 **Prometheus Metrics** - Monitor latency, errors, cache hits at `/metrics`
-- ⏱️ **Request Timeout** - Configurable timeout (default 300s)
-- 📋 **Request Queue** - Prevents overload with configurable concurrency limits
-- 💓 **Heartbeat Ping** - Keeps long-running streaming connections alive
-- 🔀 **Multi-Model Support** - Claude Opus/Sonnet/Haiku + Gemini Pro/Flash
-- ⚡ **Full Streaming** - Including tool/function calls
-
-## Installation
-
-```bash
-npm install -g vertex-ai-proxy
-```
+- 🤖 **Multi-model support**: Claude (Opus, Sonnet, Haiku), Gemini, Imagen
+- 🔄 **Format conversion**: Translates between OpenAI ↔ Anthropic API formats
+- 📡 **Streaming**: Full SSE streaming support
+- 🏷️ **Model aliases**: Create friendly names like `my-assistant` → `claude-opus-4-5`
+- 🔀 **Fallback chains**: Automatic failover when models are unavailable
+- 🌍 **Dynamic region fallback**: Automatically tries us-east5 → us-central1 → europe-west1
+- 📏 **Context management**: Auto-truncate messages to fit model limits
+- 🔐 **Google ADC**: Uses Application Default Credentials (no API keys needed)
+- 🔧 **Daemon mode**: Run as background service with `start`/`stop`/`restart`
+- 📝 **Logging**: Built-in log management with `logs` command
 
 ## Quick Start
 
-```bash
-# Set your Google Cloud project
-export PROJECT_ID=your-project-id
+### Option 1: NPX (Recommended)
 
-# Authenticate with Google Cloud
+```bash
+# Run directly without installation
+npx vertex-ai-proxy
+
+# Or start as daemon
+npx vertex-ai-proxy start --project your-gcp-project
+```
+
+### Option 2: Global Install
+
+```bash
+npm install -g vertex-ai-proxy
+vertex-ai-proxy --project your-gcp-project
+```
+
+### Option 3: From Source
+
+```bash
+git clone https://github.com/anthropics/vertex-ai-proxy.git
+cd vertex-ai-proxy
+npm install
+npm start
+```
+
+## CLI Commands
+
+### Daemon Management
+
+```bash
+# Start as background daemon
+vertex-ai-proxy start
+vertex-ai-proxy start --port 8001 --project your-project
+
+# Stop the daemon
+vertex-ai-proxy stop
+
+# Restart
+vertex-ai-proxy restart
+
+# Check status (running, uptime, request count, health)
+vertex-ai-proxy status
+
+# View logs
+vertex-ai-proxy logs           # Last 50 lines
+vertex-ai-proxy logs -n 100    # Last 100 lines  
+vertex-ai-proxy logs -f        # Follow (tail -f style)
+```
+
+### Model Management
+
+```bash
+# List all available models
+vertex-ai-proxy models
+
+# Show detailed model info
+vertex-ai-proxy models info claude-opus-4-5@20251101
+
+# Show all details including pricing
+vertex-ai-proxy models list --all
+
+# Check which models are enabled in your Vertex AI project
+vertex-ai-proxy models fetch
+
+# Enable a model in your config
+vertex-ai-proxy models enable claude-opus-4-5@20251101
+
+# Enable with an alias
+vertex-ai-proxy models enable claude-opus-4-5@20251101 --alias opus
+
+# Disable a model
+vertex-ai-proxy models disable gemini-2.5-flash
+```
+
+### Configuration
+
+```bash
+# Show current configuration
+vertex-ai-proxy config
+
+# Interactive configuration setup
+vertex-ai-proxy config set
+
+# Set default model
+vertex-ai-proxy config set-default claude-sonnet-4-5@20250514
+
+# Add a model alias
+vertex-ai-proxy config add-alias fast claude-haiku-4-5@20251001
+
+# Remove an alias
+vertex-ai-proxy config remove-alias fast
+
+# Set fallback chain
+vertex-ai-proxy config set-fallback claude-opus-4-5@20251101 claude-sonnet-4-5@20250514 gemini-2.5-pro
+
+# Export configuration for OpenClaw
+vertex-ai-proxy config export
+vertex-ai-proxy config export -o openclaw-snippet.json
+```
+
+### Setup & Utilities
+
+```bash
+# Check Google Cloud setup (auth, ADC, project)
+vertex-ai-proxy check
+
+# Configure OpenClaw integration
+vertex-ai-proxy setup-openclaw
+
+# Install as systemd service
+vertex-ai-proxy install-service --user      # User service (no sudo)
+vertex-ai-proxy install-service             # System service (requires sudo)
+```
+
+## Prerequisites
+
+### 1. Google Cloud Setup
+
+You need a GCP project with Vertex AI enabled:
+
+```bash
+# Install Google Cloud CLI (if not already installed)
+# macOS
+brew install google-cloud-sdk
+
+# Ubuntu/Debian
+curl https://sdk.cloud.google.com | bash
+
+# Authenticate
+gcloud auth login
 gcloud auth application-default login
 
-# Start the proxy
-vertex-ai-proxy
+# Set your project
+gcloud config set project YOUR_PROJECT_ID
+
+# Enable Vertex AI API
+gcloud services enable aiplatform.googleapis.com
 ```
 
-The proxy starts on `http://localhost:8001` by default.
+### 2. Claude on Vertex AI Access
 
-## Usage
+Claude models require approval. Request access in the [Vertex AI Model Garden](https://console.cloud.google.com/vertex-ai/model-garden):
 
-### CLI Options
+1. Go to Model Garden
+2. Search for "Claude"
+3. Click "Enable" on the models you want
+4. Wait for approval (usually instant for Haiku/Sonnet, may take longer for Opus)
 
-```bash
-vertex-ai-proxy [options]
+### 3. Supported Regions
 
-Options:
-  -p, --port <port>           Server port (default: 8001)
-  --host <host>               Server host (default: 0.0.0.0)
-  --project <id>              Google Cloud project ID
-  --claude-regions <regions>  Comma-separated failover regions
-  --gemini-location <loc>     Gemini location
-  --max-concurrent <n>        Max concurrent requests (default: 10)
-  --enable-logging            Enable request logging
-  --disable-cache             Disable prompt caching
-  --disable-metrics           Disable Prometheus metrics
-  -h, --help                  Show help
-```
+| Models | Regions |
+|--------|---------|
+| Claude | `us-east5`, `europe-west1` |
+| Gemini | `us-central1`, `europe-west4` |
+| Imagen | `us-central1` |
+
+## Dynamic Region Fallback
+
+The proxy automatically handles region failures by trying regions in this order:
+
+1. **us-east5** (primary for Claude)
+2. **us-central1** (global, primary for Gemini/Imagen)
+3. **europe-west1** (EU fallback for Claude)
+4. Other model-specific regions
+
+This means if `us-east5` is overloaded or has capacity issues, the proxy automatically retries in other available regions for that model.
+
+## Configuration
 
 ### Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PROJECT_ID` | - | Google Cloud project ID (required) |
-| `CLAUDE_REGIONS` | `us-east5,us-east1,europe-west1` | Comma-separated failover regions |
-| `GEMINI_LOCATION` | `us-east5` | Gemini location |
-| `PORT` | `8001` | Server port |
-| `MAX_CONCURRENT` | `10` | Max concurrent requests |
-| `QUEUE_SIZE` | `100` | Max queue size |
-| `MAX_RETRIES` | `3` | Max retries per request |
-| `REQUEST_TIMEOUT` | `300` | Request timeout in seconds |
-| `ENABLE_PROMPT_CACHE` | `true` | Enable Anthropic prompt caching |
-| `ENABLE_METRICS` | `true` | Enable Prometheus metrics |
-| `ENABLE_REQUEST_LOGGING` | `false` | Enable detailed request logging |
-| `HEARTBEAT_INTERVAL` | `15` | Streaming heartbeat interval (seconds) |
+```bash
+# Required
+export GOOGLE_CLOUD_PROJECT="your-project-id"
 
-### With Clawdbot
+# Optional (with defaults)
+export VERTEX_PROXY_PORT="8001"
+export VERTEX_PROXY_REGION="us-east5"           # For Claude
+export VERTEX_PROXY_GOOGLE_REGION="us-central1" # For Gemini/Imagen
+```
 
-Add to your `clawdbot.json`:
+### Config File
+
+Create `~/.vertex-proxy/config.yaml`:
+
+```yaml
+# Google Cloud Settings
+project_id: "your-project-id"
+default_region: "us-east5"
+google_region: "us-central1"
+
+# Model Aliases (optional)
+model_aliases:
+  my-best: "claude-opus-4-5@20251101"
+  my-fast: "claude-haiku-4-5@20251001"
+  my-cheap: "gemini-2.5-flash-lite"
+  
+  # OpenAI compatibility
+  gpt-4: "claude-opus-4-5@20251101"
+  gpt-4o: "claude-sonnet-4-5@20250514"
+  gpt-4o-mini: "claude-haiku-4-5@20251001"
+
+# Fallback Chains (optional)
+fallback_chains:
+  claude-opus-4-5@20251101:
+    - "claude-sonnet-4-5@20250514"
+    - "gemini-2.5-pro"
+
+# Context Management
+auto_truncate: true
+reserve_output_tokens: 4096
+```
+
+### Data Files
+
+The proxy stores runtime data in `~/.vertex_proxy/`:
+
+- `proxy.log` - Request/error logs
+- `proxy.pid` - Daemon PID file
+- `stats.json` - Runtime statistics (uptime, request count)
+
+## Clawdbot Integration
+
+### Setting Up a Fake Auth Profile
+
+Clawdbot normally uses Anthropic's API directly, but you can route it through the Vertex AI Proxy by setting up a "fake" auth profile. This lets you use your Google Cloud credits and take advantage of Vertex AI's infrastructure.
+
+#### Step 1: Start the Proxy
+
+```bash
+# Start the proxy daemon
+vertex-ai-proxy start --project YOUR_GCP_PROJECT
+
+# Verify it's running
+vertex-ai-proxy status
+```
+
+#### Step 2: Configure Clawdbot
+
+Add to your Clawdbot config (`~/.clawdbot/clawdbot.json` or equivalent):
 
 ```json
 {
   "models": {
+    "mode": "merge",
     "providers": {
       "vertex": {
         "baseUrl": "http://localhost:8001/v1",
-        "apiKey": "dummy",
-        "api": "openai-completions",
+        "apiKey": "vertex-proxy-fake-key",
+        "api": "anthropic-messages",
         "models": [
           {
-            "id": "opus",
+            "id": "claude-opus-4-5@20251101",
             "name": "Claude Opus 4.5 (Vertex)",
+            "input": ["text", "image"],
             "contextWindow": 200000,
-            "maxTokens": 16384
+            "maxTokens": 8192
+          },
+          {
+            "id": "claude-sonnet-4-5@20250514", 
+            "name": "Claude Sonnet 4.5 (Vertex)",
+            "input": ["text", "image"],
+            "contextWindow": 200000,
+            "maxTokens": 8192
+          },
+          {
+            "id": "claude-haiku-4-5@20251001",
+            "name": "Claude Haiku 4.5 (Vertex)",
+            "input": ["text", "image"],
+            "contextWindow": 200000,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "vertex/claude-sonnet-4-5@20250514"
+      }
+    }
+  }
+}
+```
+
+#### Step 3: Using Model Aliases
+
+You can use the built-in aliases for convenience:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "vertex/sonnet"
+      }
+    },
+    "my-agent": {
+      "model": {
+        "primary": "vertex/opus"
+      }
+    }
+  }
+}
+```
+
+The proxy automatically maps:
+- `opus` → `claude-opus-4-5@20251101`
+- `sonnet` → `claude-sonnet-4-5@20250514`
+- `haiku` → `claude-haiku-4-5@20251001`
+- `gpt-4` → `claude-opus-4-5@20251101`
+- `gpt-4o` → `claude-sonnet-4-5@20250514`
+
+#### Why Use Vertex AI Proxy with Clawdbot?
+
+1. **Cost management**: Use Google Cloud credits and billing
+2. **Enterprise features**: VPC Service Controls, audit logging
+3. **Region control**: Run in specific regions for compliance
+4. **Automatic failover**: Built-in region fallback for reliability
+5. **No separate API key**: Uses your existing GCP authentication
+
+## OpenClaw Integration
+
+### Quick Setup
+
+Run the setup script to automatically configure OpenClaw:
+
+```bash
+# After installing vertex-ai-proxy
+npx vertex-ai-proxy setup-openclaw
+```
+
+### Manual Configuration
+
+Add to your `~/.openclaw/openclaw.json`:
+
+```json
+{
+  "env": {
+    "GOOGLE_CLOUD_PROJECT": "your-project-id",
+    "GOOGLE_CLOUD_LOCATION": "us-east5"
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "vertex/claude-opus-4-5@20251101"
+      },
+      "models": {
+        "vertex/claude-opus-4-5@20251101": { "alias": "opus" },
+        "vertex/claude-sonnet-4-5@20250514": { "alias": "sonnet" },
+        "vertex/claude-haiku-4-5@20251001": { "alias": "haiku" }
+      }
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "vertex": {
+        "baseUrl": "http://localhost:8001/v1",
+        "apiKey": "vertex-proxy",
+        "api": "anthropic-messages",
+        "models": [
+          {
+            "id": "claude-opus-4-5@20251101",
+            "name": "Claude Opus 4.5 (Vertex)",
+            "input": ["text", "image"],
+            "contextWindow": 200000,
+            "maxTokens": 8192
+          },
+          {
+            "id": "claude-sonnet-4-5@20250514",
+            "name": "Claude Sonnet 4.5 (Vertex)",
+            "input": ["text", "image"],
+            "contextWindow": 200000,
+            "maxTokens": 8192
+          },
+          {
+            "id": "claude-haiku-4-5@20251001",
+            "name": "Claude Haiku 4.5 (Vertex)",
+            "input": ["text", "image"],
+            "contextWindow": 200000,
+            "maxTokens": 8192
+          },
+          {
+            "id": "gemini-3-pro",
+            "name": "Gemini 3 Pro (Vertex)",
+            "input": ["text", "image", "audio", "video"],
+            "contextWindow": 1000000,
+            "maxTokens": 8192
+          },
+          {
+            "id": "gemini-2.5-pro",
+            "name": "Gemini 2.5 Pro (Vertex)",
+            "input": ["text", "image"],
+            "contextWindow": 1000000,
+            "maxTokens": 8192
+          },
+          {
+            "id": "gemini-2.5-flash",
+            "name": "Gemini 2.5 Flash (Vertex)",
+            "input": ["text", "image"],
+            "contextWindow": 1000000,
+            "maxTokens": 8192
           }
         ]
       }
@@ -101,78 +440,161 @@ Add to your `clawdbot.json`:
 }
 ```
 
-### Programmatic Usage
+### Start the Proxy as a Service
 
-```typescript
-import { createServer, startServer } from 'vertex-ai-proxy';
+```bash
+# Install and enable as systemd service
+sudo npx vertex-ai-proxy install-service
 
-// Option 1: Start with defaults
-startServer({ projectId: 'my-project' });
-
-// Option 2: Get Express app for custom middleware
-const { app, config } = createServer({
-  projectId: 'my-project',
-  claudeRegions: ['us-east5', 'us-central1'],
-  maxConcurrent: 20,
-});
-app.listen(8080);
+# Or use the daemon commands
+vertex-ai-proxy start
+openclaw gateway restart
 ```
 
 ## API Endpoints
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /` | Health check |
-| `GET /health` | Health check with config details |
-| `GET /metrics` | Prometheus metrics |
-| `POST /v1/chat/completions` | OpenAI-compatible chat API |
+| `GET /` | Health check and server info |
+| `GET /health` | Simple health check with stats |
+| `GET /v1/models` | List available models |
+| `POST /v1/chat/completions` | OpenAI-compatible chat (recommended) |
+| `POST /v1/messages` | Anthropic Messages API |
+| `POST /v1/images/generations` | Image generation (Imagen) |
 
-## Model Aliases
+### Example Requests
 
-### Claude
-| Alias | Model |
-|-------|-------|
-| `opus` | claude-opus-4-5@20251101 |
-| `sonnet` | claude-sonnet-4-5@20250929 |
-| `haiku` | claude-haiku-3-5@20241022 |
-
-### Gemini
-| Alias | Model |
-|-------|-------|
-| `gemini-3-pro` | gemini-3-pro-preview |
-| `gemini-2.5-pro` | gemini-2.5-pro |
-| `gemini-2.0-flash` | gemini-2.0-flash |
-
-## Region Failover
-
-When a region returns 429 (rate limited), the proxy automatically tries the next region:
-
-```
-us-east5 (primary) → us-east1 → europe-west1
+**Chat Completion (OpenAI format):**
+```bash
+curl http://localhost:8001/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-opus-4-5@20251101",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": true
+  }'
 ```
 
-Healthy regions are prioritized based on recent success.
+**Chat Completion (Anthropic format):**
+```bash
+curl http://localhost:8001/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-opus-4-5@20251101",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
 
-## Metrics
+**Image Generation:**
+```bash
+curl http://localhost:8001/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "imagen-4.0-generate-001",
+    "prompt": "A cute robot learning to paint",
+    "n": 1,
+    "size": "1024x1024"
+  }'
+```
 
-Prometheus metrics available at `/metrics`:
+## Available Models
 
-- `vertex_proxy_requests_total{model,status}` - Total requests
-- `vertex_proxy_request_duration_seconds` - Request latency
-- `vertex_proxy_retries_total{model,region}` - Retry count
-- `vertex_proxy_region_failures_total{region}` - Region failures
-- `vertex_proxy_cache_hits_total` - Prompt cache hits
+### Claude Models (Anthropic on Vertex)
 
-## Requirements
+| Model | ID | Context | Price (per 1M tokens) |
+|-------|----|---------|-----------------------|
+| Opus 4.5 | `claude-opus-4-5@20251101` | 200K | $15 / $75 |
+| Sonnet 4.5 | `claude-sonnet-4-5@20250514` | 200K | $3 / $15 |
+| Haiku 4.5 | `claude-haiku-4-5@20251001` | 200K | $0.25 / $1.25 |
 
-- Node.js 18+
-- Google Cloud authentication (ADC or service account)
-- Vertex AI API enabled
+### Gemini Models
+
+| Model | ID | Context | Price (per 1M tokens) | Best For |
+|-------|----|---------|-----------------------|----------|
+| Gemini 3 Pro | `gemini-3-pro` | 1M | $2.50 / $15 | Latest & greatest |
+| Gemini 2.5 Pro | `gemini-2.5-pro` | 1M | $1.25 / $5 | Complex reasoning |
+| Gemini 2.5 Flash | `gemini-2.5-flash` | 1M | $0.15 / $0.60 | Fast responses |
+| Gemini 2.5 Flash Lite | `gemini-2.5-flash-lite` | 1M | $0.075 / $0.30 | Budget-friendly |
+
+### Imagen Models (Image Generation)
+
+| Model | ID | Description | Price |
+|-------|-----|-------------|-------|
+| Imagen 4 | `imagen-4.0-generate-001` | Best quality | ~$0.04/image |
+| Imagen 4 Fast | `imagen-4.0-fast-generate-001` | Lower latency | ~$0.02/image |
+| Imagen 4 Ultra | `imagen-4.0-ultra-generate-001` | Highest quality | ~$0.08/image |
+
+## Troubleshooting
+
+### "Requested entity was not found"
+
+1. Check your project ID is correct
+2. Ensure Claude is enabled in Model Garden
+3. Verify you're using a supported region (`us-east5` or `europe-west1` for Claude)
+
+### "Permission denied"
+
+```bash
+# Re-authenticate
+gcloud auth application-default login
+
+# Check current credentials
+gcloud auth application-default print-access-token
+```
+
+### "Model not found" in OpenClaw/Clawdbot
+
+Ensure the model is defined in `models.providers.vertex.models[]` in your config.
+
+### Streaming not working
+
+Check that your client supports SSE (Server-Sent Events). The proxy sends:
+```
+data: {"choices":[{"delta":{"content":"Hello"}}]}
+
+data: [DONE]
+```
+
+### Check proxy logs
+
+```bash
+# View recent logs
+vertex-ai-proxy logs
+
+# Follow logs in real-time
+vertex-ai-proxy logs -f
+```
+
+## Development
+
+```bash
+# Clone and install
+git clone https://github.com/anthropics/vertex-ai-proxy.git
+cd vertex-ai-proxy
+npm install
+
+# Run in development mode
+npm run dev
+
+# Run tests
+npm test
+
+# Build
+npm run build
+```
 
 ## License
 
-MIT
+MIT License - see [LICENSE](LICENSE) for details.
 
 ## Contributing
 
-PRs welcome! Please open an issue first to discuss changes.
+Contributions welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) first.
+
+## Related Projects
+
+- [OpenClaw](https://github.com/openclaw/openclaw) - Personal AI assistant
+- [Clawdbot](https://github.com/clawdbot/clawdbot) - Discord/multi-platform AI bot
+- [Anthropic Vertex SDK](https://github.com/anthropics/anthropic-sdk-python) - Official Python SDK
+- [Google Vertex AI](https://cloud.google.com/vertex-ai) - Google's AI platform
