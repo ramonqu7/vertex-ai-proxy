@@ -10,6 +10,8 @@
  *   vertex-ai-proxy restart               Restart the daemon
  *   vertex-ai-proxy status                Show proxy status
  *   vertex-ai-proxy logs                  Show proxy logs
+ *   vertex-ai-proxy test                  Run proxy test suite
+ *   vertex-ai-proxy update                Update from npm
  *   vertex-ai-proxy models                List all available models
  *   vertex-ai-proxy models fetch          Fetch/verify models from Vertex AI
  *   vertex-ai-proxy models info <model>   Show detailed model info
@@ -35,7 +37,7 @@ import * as os from 'os';
 import * as yaml from 'js-yaml';
 import * as readline from 'readline';
 
-const VERSION = '1.1.0';
+const VERSION = '1.3.0';
 const CONFIG_DIR = path.join(os.homedir(), '.vertex-proxy');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.yaml');
 const DATA_DIR = path.join(os.homedir(), '.vertex_proxy');
@@ -81,45 +83,33 @@ interface ProxyStats {
 }
 
 // ============================================================================
-// Model Catalog
+// Model Catalog (Updated with correct token counts from Vertex AI docs)
 // ============================================================================
 
 const MODEL_CATALOG: Record<string, ModelInfo> = {
-  // Claude Models
+  // Claude Models (all: 200k input, 64k output)
   'claude-opus-4-5@20251101': {
     id: 'claude-opus-4-5@20251101',
     name: 'Claude Opus 4.5',
     provider: 'anthropic',
     description: 'Most capable Claude. Best for complex reasoning.',
     contextWindow: 200000,
-    maxTokens: 8192,
+    maxTokens: 64000,
     inputPrice: 15,
     outputPrice: 75,
-    regions: ['us-east5', 'europe-west1'],
-    capabilities: ['text', 'vision', 'tools', 'thinking']
+    regions: ['us-east5', 'europe-west1', 'asia-southeast1', 'global'],
+    capabilities: ['text', 'vision', 'tools', 'computer-use']
   },
-  'claude-opus-4-1@20250410': {
-    id: 'claude-opus-4-1@20250410',
-    name: 'Claude Opus 4.1',
-    provider: 'anthropic',
-    description: 'Previous Opus generation.',
-    contextWindow: 200000,
-    maxTokens: 8192,
-    inputPrice: 15,
-    outputPrice: 75,
-    regions: ['us-east5', 'europe-west1'],
-    capabilities: ['text', 'vision', 'tools']
-  },
-  'claude-sonnet-4-5@20250514': {
-    id: 'claude-sonnet-4-5@20250514',
+  'claude-sonnet-4-5@20250929': {
+    id: 'claude-sonnet-4-5@20250929',
     name: 'Claude Sonnet 4.5',
     provider: 'anthropic',
-    description: 'Balanced performance and cost.',
+    description: 'Balanced performance and cost. Great for coding.',
     contextWindow: 200000,
-    maxTokens: 8192,
+    maxTokens: 64000,
     inputPrice: 3,
     outputPrice: 15,
-    regions: ['us-east5', 'europe-west1'],
+    regions: ['us-east5', 'europe-west1', 'asia-southeast1', 'global'],
     capabilities: ['text', 'vision', 'tools', 'thinking']
   },
   'claude-sonnet-4@20250514': {
@@ -128,36 +118,60 @@ const MODEL_CATALOG: Record<string, ModelInfo> = {
     provider: 'anthropic',
     description: 'Previous Sonnet generation.',
     contextWindow: 200000,
-    maxTokens: 8192,
+    maxTokens: 64000,
     inputPrice: 3,
     outputPrice: 15,
-    regions: ['us-east5', 'europe-west1'],
-    capabilities: ['text', 'vision', 'tools']
+    regions: ['us-east5', 'europe-west1', 'asia-east1', 'global'],
+    capabilities: ['text', 'vision', 'tools', 'thinking']
   },
   'claude-haiku-4-5@20251001': {
     id: 'claude-haiku-4-5@20251001',
     name: 'Claude Haiku 4.5',
     provider: 'anthropic',
-    description: 'Fastest and most affordable.',
+    description: 'Fastest and most affordable. Great for coding.',
     contextWindow: 200000,
-    maxTokens: 8192,
-    inputPrice: 0.25,
-    outputPrice: 1.25,
-    regions: ['us-east5', 'europe-west1'],
+    maxTokens: 64000,
+    inputPrice: 0.80,
+    outputPrice: 4,
+    regions: ['us-east5', 'europe-west1', 'asia-east1', 'global'],
+    capabilities: ['text', 'vision', 'tools', 'thinking']
+  },
+  'claude-opus-4@20250410': {
+    id: 'claude-opus-4@20250410',
+    name: 'Claude Opus 4',
+    provider: 'anthropic',
+    description: 'Previous Opus generation.',
+    contextWindow: 200000,
+    maxTokens: 64000,
+    inputPrice: 15,
+    outputPrice: 75,
+    regions: ['us-east5', 'europe-west1', 'asia-southeast1', 'global'],
     capabilities: ['text', 'vision', 'tools']
   },
   // Gemini Models
-  'gemini-3-pro': {
-    id: 'gemini-3-pro',
+  'gemini-3-pro-preview': {
+    id: 'gemini-3-pro-preview',
     name: 'Gemini 3 Pro',
     provider: 'google',
     description: 'Latest Gemini with multimodal.',
-    contextWindow: 1000000,
-    maxTokens: 8192,
+    contextWindow: 1048576,
+    maxTokens: 65536,
     inputPrice: 2.5,
     outputPrice: 15,
-    regions: ['us-central1', 'europe-west4'],
+    regions: ['global'],
     capabilities: ['text', 'vision', 'audio', 'video', 'tools']
+  },
+  'gemini-3-pro-image-preview': {
+    id: 'gemini-3-pro-image-preview',
+    name: 'Gemini 3 Pro Image',
+    provider: 'google',
+    description: 'Native image generation.',
+    contextWindow: 65536,
+    maxTokens: 32768,
+    inputPrice: 2.5,
+    outputPrice: 15,
+    regions: ['global'],
+    capabilities: ['text', 'vision', 'image-generation']
   },
   'gemini-2.5-pro': {
     id: 'gemini-2.5-pro',
@@ -165,7 +179,7 @@ const MODEL_CATALOG: Record<string, ModelInfo> = {
     provider: 'google',
     description: 'Previous Gemini Pro.',
     contextWindow: 1000000,
-    maxTokens: 8192,
+    maxTokens: 64000,
     inputPrice: 1.25,
     outputPrice: 5,
     regions: ['us-central1', 'europe-west4'],
@@ -177,7 +191,7 @@ const MODEL_CATALOG: Record<string, ModelInfo> = {
     provider: 'google',
     description: 'Fast and affordable Gemini.',
     contextWindow: 1000000,
-    maxTokens: 8192,
+    maxTokens: 64000,
     inputPrice: 0.15,
     outputPrice: 0.60,
     regions: ['us-central1', 'europe-west4'],
@@ -189,7 +203,7 @@ const MODEL_CATALOG: Record<string, ModelInfo> = {
     provider: 'google',
     description: 'Most affordable Gemini.',
     contextWindow: 1000000,
-    maxTokens: 8192,
+    maxTokens: 64000,
     inputPrice: 0.075,
     outputPrice: 0.30,
     regions: ['us-central1', 'europe-west4'],
@@ -251,7 +265,7 @@ function loadConfig(): Config {
     google_region: 'us-central1',
     model_aliases: {},
     fallback_chains: {},
-    default_model: 'claude-sonnet-4-5@20250514',
+    default_model: 'claude-sonnet-4-5@20250929',
     enabled_models: [],
     auto_truncate: true,
     reserve_output_tokens: 4096
@@ -348,7 +362,8 @@ function formatPrice(input: number, output: number): string {
 function formatCapabilities(caps: string[]): string {
   const icons: Record<string, string> = {
     'text': '📝', 'vision': '👁️', 'audio': '🎵', 'video': '🎬',
-    'tools': '🔧', 'thinking': '🧠', 'image-generation': '🎨', 'image-edit': '✏️'
+    'tools': '🔧', 'thinking': '🧠', 'image-generation': '🎨', 'image-edit': '✏️',
+    'computer-use': '🖥️'
   };
   return caps.map(c => icons[c] || c).join(' ');
 }
@@ -639,6 +654,235 @@ async function showLogs(options: any) {
 }
 
 // ============================================================================
+// Update Command
+// ============================================================================
+
+async function runUpdate(options: any) {
+  console.log(chalk.blue.bold('\n📦 Updating Vertex AI Proxy\n'));
+  
+  const spinner = ora('Checking for updates...').start();
+  
+  try {
+    // Check current version
+    const currentVersion = VERSION;
+    
+    // Check npm for latest version
+    let latestVersion: string;
+    try {
+      const npmInfo = execSync('npm view vertex-ai-proxy version 2>/dev/null', { encoding: 'utf8' }).trim();
+      latestVersion = npmInfo;
+    } catch (e) {
+      spinner.fail('Failed to check npm registry');
+      console.log(chalk.gray('   Ensure you have npm access'));
+      return;
+    }
+    
+    if (currentVersion === latestVersion) {
+      spinner.succeed(`Already at latest version (${currentVersion})`);
+      return;
+    }
+    
+    spinner.text = `Updating ${currentVersion} → ${latestVersion}...`;
+    
+    // Stop daemon if running
+    const pid = getPid();
+    if (pid && isRunning(pid)) {
+      spinner.text = 'Stopping daemon...';
+      await stopDaemon();
+    }
+    
+    // Run npm update
+    spinner.text = 'Installing update...';
+    
+    const installCmd = options.global 
+      ? 'npm install -g vertex-ai-proxy@latest'
+      : 'npm install vertex-ai-proxy@latest';
+    
+    execSync(installCmd, { stdio: 'pipe' });
+    
+    spinner.succeed(`Updated to version ${latestVersion}`);
+    
+    // Restart if was running
+    if (pid && isRunning(pid)) {
+      console.log(chalk.gray('   Restarting daemon...'));
+      await startDaemon({});
+    }
+    
+    console.log();
+    console.log(chalk.gray('Tip: Run `vertex-ai-proxy status` to verify'));
+    
+  } catch (e: any) {
+    spinner.fail(`Update failed: ${e.message}`);
+    console.log(chalk.gray('\nTry manually: npm install -g vertex-ai-proxy@latest'));
+  }
+}
+
+// ============================================================================
+// Test Command
+// ============================================================================
+
+async function runTest(options: any) {
+  console.log(chalk.blue.bold('\n🧪 Running Proxy Tests\n'));
+  
+  const stats = loadStats();
+  const port = options.port || stats?.port || 8001;
+  const proxyUrl = `http://localhost:${port}`;
+  
+  // Check if proxy is running
+  const pid = getPid();
+  if (!pid || !isRunning(pid)) {
+    console.log(chalk.yellow('⚠️  Proxy not running. Starting...'));
+    await startDaemon({ port: port.toString() });
+    // Wait for startup
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+  
+  // Define tests
+  const tests = [
+    { name: 'Health endpoint', test: testHealth },
+    { name: 'Models endpoint', test: testModels },
+    { name: 'Gemini text', test: testGeminiText },
+    { name: 'Gemini vision', test: testGeminiVision },
+  ];
+  
+  if (options.all) {
+    tests.push(
+      { name: 'Claude text', test: testClaudeText },
+      { name: 'Imagen generation', test: testImagen },
+      { name: 'Gemini native image', test: testGeminiImage },
+    );
+  }
+  
+  let passed = 0;
+  let failed = 0;
+  
+  for (const { name, test } of tests) {
+    const spinner = ora(name).start();
+    try {
+      const result = await test(proxyUrl);
+      spinner.succeed(`${name}: ${result}`);
+      passed++;
+    } catch (e: any) {
+      spinner.fail(`${name}: ${e.message}`);
+      failed++;
+    }
+  }
+  
+  console.log();
+  console.log(chalk.gray('─'.repeat(40)));
+  console.log(`Results: ${chalk.green(`${passed} passed`)}, ${failed > 0 ? chalk.red(`${failed} failed`) : '0 failed'}`);
+  
+  if (!options.all) {
+    console.log(chalk.gray('\nTip: vertex-ai-proxy test --all (include Claude, Imagen)'));
+  }
+}
+
+async function testHealth(url: string): Promise<string> {
+  const response = await fetch(`${url}/health`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = await response.json() as any;
+  return `uptime ${data.uptime}s`;
+}
+
+async function testModels(url: string): Promise<string> {
+  const response = await fetch(`${url}/v1/models`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = await response.json() as any;
+  return `${data.data?.length || 0} models`;
+}
+
+async function testGeminiText(url: string): Promise<string> {
+  const response = await fetch(`${url}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'gemini-2.5-flash',
+      messages: [{ role: 'user', content: 'Say "ok" and nothing else' }],
+      max_tokens: 10
+    })
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = await response.json() as any;
+  const text = data.choices?.[0]?.message?.content || '';
+  return `"${text.slice(0, 20)}"`;
+}
+
+async function testGeminiVision(url: string): Promise<string> {
+  const response = await fetch(`${url}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'gemini-3-pro-preview',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'What logo? One word.' },
+          { type: 'image_url', image_url: { url: 'https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png' }}
+        ]
+      }],
+      max_tokens: 100
+    })
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = await response.json() as any;
+  const text = data.choices?.[0]?.message?.content || '';
+  return `"${text.slice(0, 20)}"`;
+}
+
+async function testClaudeText(url: string): Promise<string> {
+  const response = await fetch(`${url}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5@20251001',
+      messages: [{ role: 'user', content: 'Say "ok"' }],
+      max_tokens: 10
+    })
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = await response.json() as any;
+  const text = data.choices?.[0]?.message?.content || '';
+  return `"${text.slice(0, 20)}"`;
+}
+
+async function testImagen(url: string): Promise<string> {
+  const response = await fetch(`${url}/v1/images/generations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'imagen-4.0-generate-001',
+      prompt: 'red circle',
+      n: 1
+    })
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = await response.json() as any;
+  const size = data.data?.[0]?.b64_json?.length || 0;
+  if (size === 0) throw new Error('No image returned');
+  return `${Math.round(size / 1024)}KB`;
+}
+
+async function testGeminiImage(url: string): Promise<string> {
+  const response = await fetch(`${url}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'gemini-3-pro-image-preview',
+      messages: [{ role: 'user', content: 'Draw a blue square' }],
+      max_tokens: 8000
+    })
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = await response.json() as any;
+  const size = data.images?.[0]?.b64_json?.length || 0;
+  if (size === 0) {
+    const text = data.choices?.[0]?.message?.content || '';
+    return `text only: "${text.slice(0, 20)}"`;
+  }
+  return `${Math.round(size / 1024)}KB`;
+}
+
+// ============================================================================
 // Commands
 // ============================================================================
 
@@ -646,7 +890,7 @@ const program = new Command();
 
 program
   .name('vertex-ai-proxy')
-  .description('Proxy server for Vertex AI models with OpenClaw support')
+  .description('Proxy server for Vertex AI models with OpenAI-compatible API')
   .version(VERSION);
 
 // --- Daemon management commands ---
@@ -680,6 +924,18 @@ program.command('logs')
   .option('-f, --follow', 'Follow log output (tail -f style)')
   .option('-n, --lines <number>', 'Number of lines to show', '50')
   .action(showLogs);
+
+// --- New commands ---
+program.command('update')
+  .description('Update vertex-ai-proxy from npm')
+  .option('-g, --global', 'Update global installation')
+  .action(runUpdate);
+
+program.command('test')
+  .description('Run proxy test suite')
+  .option('-p, --port <port>', 'Proxy port')
+  .option('-a, --all', 'Run all tests including Claude and Imagen')
+  .action(runTest);
 
 // --- models command ---
 const modelsCmd = program.command('models').description('List and manage models');
@@ -820,6 +1076,7 @@ async function listModels(options: any) {
       
       if (options.all) {
         console.log(`     ${chalk.cyan('Context:')} ${(model.contextWindow / 1000).toFixed(0)}K`);
+        console.log(`     ${chalk.cyan('Max out:')} ${(model.maxTokens / 1000).toFixed(0)}K`);
         console.log(`     ${chalk.cyan('Price:')} ${formatPrice(model.inputPrice, model.outputPrice)} /1M tok`);
         console.log(`     ${chalk.cyan('Regions:')} ${model.regions.join(', ')}`);
         console.log(`     ${chalk.cyan('Caps:')} ${formatCapabilities(model.capabilities)}`);
@@ -907,7 +1164,7 @@ async function showModelInfo(modelId: string) {
   console.log(`${chalk.cyan('Description:')}  ${model.description}`);
   console.log();
   console.log(`${chalk.cyan('Context:')}      ${(model.contextWindow / 1000).toFixed(0)}K tokens`);
-  console.log(`${chalk.cyan('Max Output:')}   ${model.maxTokens} tokens`);
+  console.log(`${chalk.cyan('Max Output:')}   ${(model.maxTokens / 1000).toFixed(0)}K tokens`);
   console.log(`${chalk.cyan('Price:')}        $${model.inputPrice} in / $${model.outputPrice} out (per 1M)`);
   console.log();
   console.log(`${chalk.cyan('Regions:')}      ${model.regions.join(', ')}`);
@@ -1013,14 +1270,14 @@ async function interactiveConfig() {
   console.log(chalk.yellow('\n📦 Select default model:\n'));
   const modelOptions = [
     'claude-opus-4-5@20251101 - Most capable ($$)',
-    'claude-sonnet-4-5@20250514 - Balanced ($)',
+    'claude-sonnet-4-5@20250929 - Balanced ($)',
     'claude-haiku-4-5@20251001 - Fast & cheap',
-    'gemini-2.5-pro - Google\'s best',
+    'gemini-3-pro-preview - Google\'s best',
     'gemini-2.5-flash - Fast Gemini'
   ];
   const modelIds = [
-    'claude-opus-4-5@20251101', 'claude-sonnet-4-5@20250514', 'claude-haiku-4-5@20251001',
-    'gemini-2.5-pro', 'gemini-2.5-flash'
+    'claude-opus-4-5@20251101', 'claude-sonnet-4-5@20250929', 'claude-haiku-4-5@20251001',
+    'gemini-3-pro-preview', 'gemini-2.5-flash'
   ];
   
   const modelChoice = await promptSelect('', modelOptions);
@@ -1028,12 +1285,12 @@ async function interactiveConfig() {
   
   // Enable models
   if (await promptYesNo(chalk.cyan('\nEnable all Claude models?'))) {
-    ['claude-opus-4-5@20251101', 'claude-sonnet-4-5@20250514', 'claude-haiku-4-5@20251001']
+    ['claude-opus-4-5@20251101', 'claude-sonnet-4-5@20250929', 'claude-haiku-4-5@20251001']
       .forEach(m => { if (!config.enabled_models.includes(m)) config.enabled_models.push(m); });
   }
   
   if (await promptYesNo(chalk.cyan('Enable Gemini models?'))) {
-    ['gemini-2.5-pro', 'gemini-2.5-flash']
+    ['gemini-3-pro-preview', 'gemini-2.5-flash']
       .forEach(m => { if (!config.enabled_models.includes(m)) config.enabled_models.push(m); });
   }
   
@@ -1042,12 +1299,12 @@ async function interactiveConfig() {
     config.model_aliases = {
       ...config.model_aliases,
       opus: 'claude-opus-4-5@20251101',
-      sonnet: 'claude-sonnet-4-5@20250514',
+      sonnet: 'claude-sonnet-4-5@20250929',
       haiku: 'claude-haiku-4-5@20251001',
-      gemini: 'gemini-2.5-pro',
+      gemini: 'gemini-3-pro-preview',
       'gemini-flash': 'gemini-2.5-flash',
       'gpt-4': 'claude-opus-4-5@20251101',
-      'gpt-4o': 'claude-sonnet-4-5@20250514',
+      'gpt-4o': 'claude-sonnet-4-5@20250929',
       'gpt-4o-mini': 'claude-haiku-4-5@20251001'
     };
   }
@@ -1055,8 +1312,8 @@ async function interactiveConfig() {
   // Fallbacks
   if (await promptYesNo(chalk.cyan('Set up fallback chains?'))) {
     config.fallback_chains = {
-      'claude-opus-4-5@20251101': ['claude-sonnet-4-5@20250514', 'gemini-2.5-pro'],
-      'claude-sonnet-4-5@20250514': ['claude-haiku-4-5@20251001', 'gemini-2.5-flash'],
+      'claude-opus-4-5@20251101': ['claude-sonnet-4-5@20250929', 'gemini-3-pro-preview'],
+      'claude-sonnet-4-5@20250929': ['claude-haiku-4-5@20251001', 'gemini-2.5-flash'],
       'claude-haiku-4-5@20251001': ['gemini-2.5-flash-lite']
     };
   }
