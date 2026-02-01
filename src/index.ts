@@ -468,17 +468,31 @@ async function handleChatCompletions(req: Request, res: Response, config: Config
         temperature,
         config
       });
-    } else if (provider === 'google') {
-      await handleGeminiChat(res, {
-        modelId,
-        system,
-        messages: finalMessages,
-        stream: stream ?? false,
-        maxTokens: max_tokens || modelSpec?.maxTokens || 4096,
-        temperature,
-        config,
-        modelRegion: modelSpec?.regions?.[0]
-      });
+} else if (provider === 'google') {
+      // Use @google/genai SDK for global region models (like gemini-3-pro-preview)
+      const modelRegion = modelSpec?.regions?.[0];
+      if (modelRegion === 'global') {
+        await handleGenAIChat(res, {
+          modelId,
+          system,
+          messages: finalMessages,
+          stream: stream ?? false,
+          maxTokens: max_tokens || modelSpec?.maxTokens || 4096,
+          temperature,
+          config
+        });
+      } else {
+        await handleGeminiChat(res, {
+          modelId,
+          system,
+          messages: finalMessages,
+          stream: stream ?? false,
+          maxTokens: max_tokens || modelSpec?.maxTokens || 4096,
+          temperature,
+          config,
+          modelRegion
+        });
+      }
     } else {
       res.status(400).json({ error: `Unsupported provider: ${provider}` });
     }
@@ -804,6 +818,98 @@ async function handleGeminiChat(res: Response, options: {
           content: text
         },
         finish_reason: 'stop'
+      }],
+      usage: {
+        prompt_tokens: response.usageMetadata?.promptTokenCount || 0,
+        completion_tokens: response.usageMetadata?.candidatesTokenCount || 0,
+        total_tokens: response.usageMetadata?.totalTokenCount || 0
+      }
+    });
+  }
+}
+// Add this handler function after the existing handleGeminiChat function
+
+async function handleGenAIChat(res: Response, options: {
+  modelId: string;
+  system: string | null;
+  messages: ChatMessage[];
+  stream: boolean;
+  maxTokens: number;
+  temperature?: number;
+  config: Config;
+}) {
+  const { GoogleGenAI } = await import("@google/genai");
+  const { modelId, system, messages, stream, maxTokens, temperature, config } = options;
+  
+  const ai = new GoogleGenAI({
+    vertexai: true,
+    project: config.project_id,
+    location: "global"
+  });
+  
+  // Build contents from messages
+  const contents = messages.map(msg => ({
+    role: msg.role === "assistant" ? "model" : "user",
+    parts: [{ text: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content) }]
+  }));
+
+  if (stream) {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    
+    const response = await ai.models.generateContentStream({
+      model: modelId,
+      contents,
+      config: {
+        maxOutputTokens: maxTokens,
+        temperature,
+        systemInstruction: system || undefined
+      }
+    });
+    
+    for await (const chunk of response) {
+      const text = chunk.text || "";
+      if (text) {
+        const openaiChunk = {
+          id: `chatcmpl-${Date.now()}`,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          model: modelId,
+          choices: [{
+            index: 0,
+            delta: { content: text },
+            finish_reason: null
+          }]
+        };
+        res.write(`data: ${JSON.stringify(openaiChunk)}\n\n`);
+      }
+    }
+    
+    res.write(`data: [DONE]\n\n`);
+    res.end();
+  } else {
+    const response = await ai.models.generateContent({
+      model: modelId,
+      contents,
+      config: {
+        maxOutputTokens: maxTokens,
+        temperature,
+        systemInstruction: system || undefined
+      }
+    });
+
+    const text = response.text || "";
+    
+    res.json({
+      id: `chatcmpl-${Date.now()}`,
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model: modelId,
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: text },
+        finish_reason: "stop"
       }],
       usage: {
         prompt_tokens: response.usageMetadata?.promptTokenCount || 0,
