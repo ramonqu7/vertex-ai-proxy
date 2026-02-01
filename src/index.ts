@@ -11,6 +11,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as yaml from 'js-yaml';
+import { loadRegionCache } from './regions.js';
 
 // ============================================================================
 // Types
@@ -240,32 +241,46 @@ export const MODEL_CATALOG: Record<string, ModelSpec> = {
 
 /**
  * Get ordered fallback regions for a model.
- * Priority: us-east5 -> us-central1 (global) -> europe-west1 -> other regions
+ * First checks cached discovery data, then falls back to static catalog.
+ * Priority: us-east5 -> us-central1 -> europe-west1
  */
 function getRegionFallbackOrder(modelId: string): string[] {
+  const priorityOrder = ['us-east5', 'us-central1', 'europe-west1'];
+  
+  // Try cached region data first
+  const cache = loadRegionCache();
+  if (cache && cache.models[modelId]) {
+    const cachedRegions = cache.models[modelId].availableRegions;
+    if (cachedRegions.length > 0) {
+      const ordered: string[] = [];
+      for (const region of priorityOrder) {
+        if (cachedRegions.includes(region)) {
+          ordered.push(region);
+        }
+      }
+      for (const region of cachedRegions) {
+        if (!ordered.includes(region)) {
+          ordered.push(region);
+        }
+      }
+      log('Using cached regions for ' + modelId + ': ' + ordered.join(', '));
+      return ordered;
+    }
+  }
+  
+  // Fall back to static catalog
   const modelSpec = MODEL_CATALOG[modelId];
   if (!modelSpec) {
-    // Default fallback order if model not found
-    return ['us-east5', 'us-central1', 'europe-west1'];
+    return priorityOrder;
   }
   
   const modelRegions = modelSpec.regions;
-  const priorityOrder = ['us-east5', 'us-central1', 'europe-west1'];
-  
-  // Build ordered list: priority regions first (if available), then remaining
   const ordered: string[] = [];
-  
   for (const region of priorityOrder) {
-    if (modelRegions.includes(region)) {
-      ordered.push(region);
-    }
+    if (modelRegions.includes(region)) ordered.push(region);
   }
-  
-  // Add any remaining model regions not in priority list
   for (const region of modelRegions) {
-    if (!ordered.includes(region)) {
-      ordered.push(region);
-    }
+    if (!ordered.includes(region)) ordered.push(region);
   }
   
   return ordered;

@@ -179,7 +179,7 @@ const MODEL_CATALOG: Record<string, ModelInfo> = {
     provider: 'google',
     description: 'Previous Gemini Pro.',
     contextWindow: 1000000,
-    maxTokens: 64000,
+    maxTokens: 8192,
     inputPrice: 1.25,
     outputPrice: 5,
     regions: ['us-central1', 'europe-west4'],
@@ -191,7 +191,7 @@ const MODEL_CATALOG: Record<string, ModelInfo> = {
     provider: 'google',
     description: 'Fast and affordable Gemini.',
     contextWindow: 1000000,
-    maxTokens: 64000,
+    maxTokens: 8192,
     inputPrice: 0.15,
     outputPrice: 0.60,
     regions: ['us-central1', 'europe-west4'],
@@ -203,7 +203,7 @@ const MODEL_CATALOG: Record<string, ModelInfo> = {
     provider: 'google',
     description: 'Most affordable Gemini.',
     contextWindow: 1000000,
-    maxTokens: 64000,
+    maxTokens: 8192,
     inputPrice: 0.075,
     outputPrice: 0.30,
     regions: ['us-central1', 'europe-west4'],
@@ -964,6 +964,91 @@ modelsCmd.command('enable <model>')
 modelsCmd.command('disable <model>')
   .description('Disable a model')
   .action(disableModel);
+
+
+modelsCmd.command("discover")
+  .description("Probe Vertex AI to discover available Claude models per region")
+  .action(async () => {
+    console.log(chalk.blue.bold("\n🔍 Discovering Available Claude Models\n"));
+    
+    const config = loadConfig();
+    if (!config.project_id) {
+      console.log(chalk.red("No project ID. Run: vertex-ai-proxy config set"));
+      return;
+    }
+
+    const { GoogleAuth } = await import("google-auth-library");
+    const auth = new GoogleAuth({ scopes: "https://www.googleapis.com/auth/cloud-platform" });
+    const client = await auth.getClient();
+    const tokenResponse = await client.getAccessToken();
+    const accessToken = tokenResponse.token;
+
+    const REGIONS = ["us-east5", "europe-west1", "asia-southeast1", "asia-east1"];
+    const CLAUDE_MODELS = [
+      "claude-opus-4-5@20251101",
+      "claude-sonnet-4-5@20250929",
+      "claude-sonnet-4@20250514",
+      "claude-haiku-4-5@20251001",
+      "claude-3-haiku@20240307",
+      "claude-3-5-sonnet@20240620",
+      "claude-3-5-sonnet-v2@20241022",
+    ];
+
+    const results: Record<string, string[]> = {};
+
+    for (const modelId of CLAUDE_MODELS) {
+      results[modelId] = [];
+      process.stdout.write(chalk.cyan(`  ${modelId}:`));
+      
+      for (const region of REGIONS) {
+        const url = `https://${region}-aiplatform.googleapis.com/v1/projects/${config.project_id}/locations/${region}/publishers/anthropic/models/${modelId}:rawPredict`;
+        
+        try {
+          const response = await fetch(url, {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${accessToken}`,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              anthropic_version: "vertex-2023-10-16",
+              max_tokens: 1,
+              messages: [{ role: "user", content: "hi" }]
+            })
+          });
+
+          if (response.ok) {
+            results[modelId].push(region);
+            process.stdout.write(chalk.green(` ${region}✓`));
+          } else {
+            process.stdout.write(chalk.gray(` ${region}✗`));
+          }
+        } catch (e) {
+          process.stdout.write(chalk.red(` ${region}!`));
+        }
+      }
+      console.log();
+    }
+
+    // Save to cache
+    ensureDataDir();
+    const cacheFile = path.join(DATA_DIR, "model_regions.json");
+    fs.writeFileSync(cacheFile, JSON.stringify({ updated: Date.now(), models: results }, null, 2));
+    
+    console.log(chalk.green(`\n✓ Saved to ${cacheFile}`));
+    
+    // Summary
+    console.log(chalk.yellow.bold("\n📊 Available Models:\n"));
+    for (const [modelId, regions] of Object.entries(results)) {
+      if (regions.length > 0) {
+        console.log(`  ${chalk.green("✓")} ${modelId}: ${regions.join(", ")}`);
+      } else {
+        console.log(`  ${chalk.red("✗")} ${modelId}: not available`);
+      }
+    }
+    
+    console.log(chalk.gray("\nNote: Enable Claude at https://console.cloud.google.com/vertex-ai/model-garden"));
+  });
 
 modelsCmd.action(() => listModels({}));
 

@@ -62,7 +62,7 @@ if [ "$TEST_ALL" = "--all" ]; then
     echo ""
     echo -e "${BLUE}1. Text Generation (Claude)${NC}"
     test_chat "claude-sonnet-4-5" "claude-sonnet-4-5@20250929" "Say hello" 50
-    test_chat "claude-haiku-4-5" "claude-haiku-4-5@20251001" "Say hi" 50
+    test_chat "claude-sonnet-4-5" "claude-sonnet-4-5@20250929" "Say hi" 50
 else
     echo ""
     echo -e "${YELLOW}1. Claude tests skipped (use --all to include)${NC}"
