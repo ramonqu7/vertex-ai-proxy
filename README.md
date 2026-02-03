@@ -553,3 +553,63 @@ Contributions welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) first.
 - [Clawdbot](https://github.com/clawdbot/clawdbot) - Discord/multi-platform AI bot
 - [Anthropic Vertex SDK](https://github.com/anthropics/anthropic-sdk-python) - Official Python SDK
 - [Google Vertex AI](https://cloud.google.com/vertex-ai) - Google's AI platform
+
+## Google Search Grounding
+
+Enable real-time web search for Gemini models to get up-to-date information.
+
+### Per-Request
+
+```bash
+# Via header
+curl http://localhost:8001/v1/chat/completions \
+  -H "X-Enable-Grounding: true" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": "Bitcoin price today"}]}'
+
+# Via body parameter
+curl http://localhost:8001/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-2.5-flash",
+    "messages": [{"role": "user", "content": "Latest news about AI"}],
+    "grounding": true
+  }'
+
+# With custom threshold (0-1, lower = more likely to search)
+curl http://localhost:8001/v1/chat/completions \
+  -d '{
+    "model": "gemini-2.5-flash",
+    "messages": [...],
+    "grounding": {"mode": "MODE_DYNAMIC", "dynamicThreshold": 0.3}
+  }'
+```
+
+### Global Config
+
+Enable grounding by default in `~/.vertex-proxy/config.yaml`:
+
+```yaml
+grounding:
+  enabled: true
+  mode: MODE_DYNAMIC
+  dynamicThreshold: 0.3
+```
+
+### Response
+
+When grounding is used, the response includes source information:
+
+```json
+{
+  "choices": [...],
+  "grounding": {
+    "web_search_queries": ["bitcoin price USD today"],
+    "sources": [
+      {"uri": "https://...", "title": "..."}
+    ]
+  }
+}
+```
+
+Supported models: `gemini-3-pro-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`

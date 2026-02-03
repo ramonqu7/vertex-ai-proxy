@@ -37,6 +37,11 @@ interface Config {
   fallback_chains: Record<string, string[]>;
   auto_truncate: boolean;
   reserve_output_tokens: number;
+  grounding?: {
+    enabled?: boolean;
+    mode?: 'MODE_DYNAMIC' | 'MODE_UNSPECIFIED';
+    dynamicThreshold?: number;
+  };
 }
 
 interface ChatMessage {
@@ -340,6 +345,11 @@ function loadConfig(): Config {
     project_id: process.env.GOOGLE_CLOUD_PROJECT || '',
     default_region: process.env.VERTEX_PROXY_REGION || 'us-east5',
     google_region: process.env.VERTEX_PROXY_GOOGLE_REGION || 'us-central1',
+    grounding: {
+      enabled: false,
+      mode: 'MODE_DYNAMIC',
+      dynamicThreshold: 0.3
+    },
     model_aliases: {
       'gpt-4': 'claude-opus-4-5@20251101',
       'gpt-4-turbo': 'claude-sonnet-4-5@20250929',
@@ -487,17 +497,23 @@ function truncateMessages(
  * - Header: X-Enable-Grounding: true
  * - Body: { grounding: true } or { grounding: { mode: "MODE_DYNAMIC", dynamicThreshold: 0.3 } }
  */
-function parseGroundingConfig(req: Request): GroundingConfig {
-  // Check header first
+function parseGroundingConfig(req: Request, config: Config): GroundingConfig {
+  // Check header first (explicit override)
   const headerValue = req.headers['x-enable-grounding'];
   if (headerValue === 'true' || headerValue === '1') {
     return { enabled: true, mode: 'MODE_DYNAMIC', dynamicThreshold: 0.3 };
   }
+  if (headerValue === 'false' || headerValue === '0') {
+    return { enabled: false };
+  }
   
-  // Check body
+  // Check body (explicit override)
   const bodyGrounding = req.body?.grounding;
   if (bodyGrounding === true) {
     return { enabled: true, mode: 'MODE_DYNAMIC', dynamicThreshold: 0.3 };
+  }
+  if (bodyGrounding === false) {
+    return { enabled: false };
   }
   
   if (typeof bodyGrounding === 'object' && bodyGrounding !== null) {
@@ -505,6 +521,15 @@ function parseGroundingConfig(req: Request): GroundingConfig {
       enabled: true,
       mode: bodyGrounding.mode || 'MODE_DYNAMIC',
       dynamicThreshold: bodyGrounding.dynamicThreshold ?? 0.3
+    };
+  }
+  
+  // Fall back to global config
+  if (config.grounding?.enabled) {
+    return {
+      enabled: true,
+      mode: config.grounding.mode || 'MODE_DYNAMIC',
+      dynamicThreshold: config.grounding.dynamicThreshold ?? 0.3
     };
   }
   
@@ -546,7 +571,7 @@ async function handleChatCompletions(req: Request, res: Response, config: Config
   const { model: modelInput, messages, stream, max_tokens, temperature, tools, tool_choice } = req.body;
   
   // Parse grounding config
-  const groundingConfig = parseGroundingConfig(req);
+  const groundingConfig = parseGroundingConfig(req, config);
 
   log(`[${requestId}] ====== NEW REQUEST ======`);
   log(`[${requestId}] Model: ${modelInput}, Stream: ${stream}, Messages: ${messages?.length}, Grounding: ${groundingConfig.enabled}`);
