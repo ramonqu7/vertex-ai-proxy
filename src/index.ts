@@ -48,6 +48,38 @@ interface ChatMessage {
 }
 
 // ============================================================================
+// Grounding Types
+// ============================================================================
+
+interface GroundingConfig {
+  enabled: boolean;
+  mode?: 'MODE_DYNAMIC' | 'MODE_UNSPECIFIED';
+  dynamicThreshold?: number; // 0-1, lower = more likely to search
+}
+
+interface GroundingMetadata {
+  webSearchQueries?: string[];
+  groundingChunks?: Array<{
+    web?: {
+      uri?: string;
+      title?: string;
+    };
+  }>;
+  groundingSupports?: Array<{
+    segment?: {
+      startIndex?: number;
+      endIndex?: number;
+      text?: string;
+    };
+    groundingChunkIndices?: number[];
+    confidenceScores?: number[];
+  }>;
+  searchEntryPoint?: {
+    renderedContent?: string;
+  };
+}
+
+// ============================================================================
 // Logging
 // ============================================================================
 
@@ -157,7 +189,17 @@ export const MODEL_CATALOG: Record<string, ModelSpec> = {
     capabilities: ['text', 'vision', 'tools']
   },
   // Gemini Models
-'gemini-3-pro-image-preview': {    id: 'gemini-3-pro-image-preview',    name: 'Gemini 3 Pro Image',    provider: 'google',    contextWindow: 65536,    maxTokens: 32768,    inputPrice: 2.5,    outputPrice: 15,    regions: ['global'],    capabilities: ['text', 'vision', 'image-generation']  },
+  'gemini-3-pro-image-preview': {
+    id: 'gemini-3-pro-image-preview',
+    name: 'Gemini 3 Pro Image',
+    provider: 'google',
+    contextWindow: 65536,
+    maxTokens: 32768,
+    inputPrice: 2.5,
+    outputPrice: 15,
+    regions: ['global'],
+    capabilities: ['text', 'vision', 'image-generation']
+  },
   'gemini-3-pro-preview': {
     id: 'gemini-3-pro-preview',
     name: 'Gemini 3 Pro',
@@ -167,7 +209,7 @@ export const MODEL_CATALOG: Record<string, ModelSpec> = {
     inputPrice: 2.5,
     outputPrice: 15,
     regions: ['global'],
-    capabilities: ['text', 'vision', 'audio', 'video']
+    capabilities: ['text', 'vision', 'audio', 'video', 'grounding']
   },
   'gemini-2.5-pro': {
     id: 'gemini-2.5-pro',
@@ -178,7 +220,7 @@ export const MODEL_CATALOG: Record<string, ModelSpec> = {
     inputPrice: 1.25,
     outputPrice: 5,
     regions: ['us-central1', 'europe-west4'],
-    capabilities: ['text', 'vision']
+    capabilities: ['text', 'vision', 'grounding']
   },
   'gemini-2.5-flash': {
     id: 'gemini-2.5-flash',
@@ -189,7 +231,7 @@ export const MODEL_CATALOG: Record<string, ModelSpec> = {
     inputPrice: 0.15,
     outputPrice: 0.60,
     regions: ['us-central1', 'europe-west4'],
-    capabilities: ['text', 'vision']
+    capabilities: ['text', 'vision', 'grounding']
   },
   'gemini-2.5-flash-lite': {
     id: 'gemini-2.5-flash-lite',
@@ -436,15 +478,78 @@ function truncateMessages(
 }
 
 // ============================================================================
+// Grounding Helper
+// ============================================================================
+
+/**
+ * Parse grounding config from request.
+ * Supports multiple formats:
+ * - Header: X-Enable-Grounding: true
+ * - Body: { grounding: true } or { grounding: { mode: "MODE_DYNAMIC", dynamicThreshold: 0.3 } }
+ */
+function parseGroundingConfig(req: Request): GroundingConfig {
+  // Check header first
+  const headerValue = req.headers['x-enable-grounding'];
+  if (headerValue === 'true' || headerValue === '1') {
+    return { enabled: true, mode: 'MODE_DYNAMIC', dynamicThreshold: 0.3 };
+  }
+  
+  // Check body
+  const bodyGrounding = req.body?.grounding;
+  if (bodyGrounding === true) {
+    return { enabled: true, mode: 'MODE_DYNAMIC', dynamicThreshold: 0.3 };
+  }
+  
+  if (typeof bodyGrounding === 'object' && bodyGrounding !== null) {
+    return {
+      enabled: true,
+      mode: bodyGrounding.mode || 'MODE_DYNAMIC',
+      dynamicThreshold: bodyGrounding.dynamicThreshold ?? 0.3
+    };
+  }
+  
+  return { enabled: false };
+}
+
+/**
+ * Format grounding metadata for response
+ */
+function formatGroundingResponse(metadata: GroundingMetadata): any {
+  if (!metadata) return null;
+  
+  const sources: Array<{ uri: string; title: string }> = [];
+  
+  if (metadata.groundingChunks) {
+    for (const chunk of metadata.groundingChunks) {
+      if (chunk.web?.uri) {
+        sources.push({
+          uri: chunk.web.uri,
+          title: chunk.web.title || chunk.web.uri
+        });
+      }
+    }
+  }
+  
+  return {
+    web_search_queries: metadata.webSearchQueries || [],
+    sources,
+    search_entry_point: metadata.searchEntryPoint?.renderedContent || null
+  };
+}
+
+// ============================================================================
 // API Handlers
 // ============================================================================
 
 async function handleChatCompletions(req: Request, res: Response, config: Config) {
   const requestId = `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   const { model: modelInput, messages, stream, max_tokens, temperature, tools, tool_choice } = req.body;
+  
+  // Parse grounding config
+  const groundingConfig = parseGroundingConfig(req);
 
   log(`[${requestId}] ====== NEW REQUEST ======`);
-  log(`[${requestId}] Model: ${modelInput}, Stream: ${stream}, Messages: ${messages?.length}`);
+  log(`[${requestId}] Model: ${modelInput}, Stream: ${stream}, Messages: ${messages?.length}, Grounding: ${groundingConfig.enabled}`);
 
   // Resolve model alias
   const modelId = resolveModel(modelInput, config);
@@ -508,7 +613,7 @@ async function handleChatCompletions(req: Request, res: Response, config: Config
         tools,
         tool_choice
       });
-} else if (provider === 'google') {
+    } else if (provider === 'google') {
       // Use @google/genai SDK for global region models (like gemini-3-pro-preview)
       const modelRegion = modelSpec?.regions?.[0];
       if (modelRegion === 'global') {
@@ -519,7 +624,8 @@ async function handleChatCompletions(req: Request, res: Response, config: Config
           stream: stream ?? false,
           maxTokens: max_tokens || modelSpec?.maxTokens || 4096,
           temperature,
-          config
+          config,
+          grounding: groundingConfig
         });
       } else {
         await handleGeminiChat(res, {
@@ -530,7 +636,8 @@ async function handleChatCompletions(req: Request, res: Response, config: Config
           maxTokens: max_tokens || modelSpec?.maxTokens || 4096,
           temperature,
           config,
-          modelRegion
+          modelRegion,
+          grounding: groundingConfig
         });
       }
     } else {
@@ -1009,22 +1116,39 @@ async function handleGeminiChat(res: Response, options: {
   temperature?: number;
   config: Config;
   modelRegion?: string;
+  grounding?: GroundingConfig;
 }) {
-  const { modelId, system, messages, stream, maxTokens, temperature, config, modelRegion } = options;
+  const { modelId, system, messages, stream, maxTokens, temperature, config, modelRegion, grounding } = options;
   
   const vertexAI = new VertexAI({
     project: config.project_id,
     location: modelRegion || config.google_region
   });
   
-  const model = vertexAI.getGenerativeModel({
+  // Build model config with optional grounding
+  const modelConfig: any = {
     model: modelId,
     generationConfig: {
       maxOutputTokens: maxTokens,
       temperature: temperature
     },
     systemInstruction: system || undefined
-  });
+  };
+  
+  // Add grounding tool if enabled
+  if (grounding?.enabled) {
+    log(`Enabling Google Search grounding for ${modelId}`);
+    modelConfig.tools = [{
+      googleSearchRetrieval: {
+        dynamicRetrievalConfig: {
+          mode: grounding.mode || 'MODE_DYNAMIC',
+          dynamicThreshold: grounding.dynamicThreshold ?? 0.3
+        }
+      }
+    }];
+  }
+  
+  const model = vertexAI.getGenerativeModel(modelConfig);
   
   // Convert messages to Gemini format
   const contents = messages.map(msg => ({
@@ -1051,9 +1175,16 @@ async function handleGeminiChat(res: Response, options: {
       })}\n\n`);
 
       const result = await model.generateContentStream({ contents });
+      let groundingMetadata: GroundingMetadata | null = null;
 
       for await (const chunk of result.stream) {
         const text = chunk.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        
+        // Capture grounding metadata from the response
+        if (chunk.candidates?.[0]?.groundingMetadata) {
+          groundingMetadata = chunk.candidates[0].groundingMetadata as GroundingMetadata;
+        }
+        
         if (text) {
           const openaiChunk = {
             id: completionId,
@@ -1070,7 +1201,8 @@ async function handleGeminiChat(res: Response, options: {
         }
       }
 
-      const finalChunk = {
+      // Send grounding metadata in final chunk if available
+      const finalChunk: any = {
         id: completionId,
         object: 'chat.completion.chunk',
         created: Math.floor(Date.now() / 1000),
@@ -1081,6 +1213,11 @@ async function handleGeminiChat(res: Response, options: {
           finish_reason: 'stop'
         }]
       };
+      
+      if (groundingMetadata) {
+        finalChunk.grounding = formatGroundingResponse(groundingMetadata);
+      }
+      
       res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
       res.write('data: [DONE]\n\n');
       res.end();
@@ -1098,7 +1235,10 @@ async function handleGeminiChat(res: Response, options: {
     const response = result.response;
     const text = response.candidates?.[0]?.content?.parts?.[0]?.text || '';
     
-    res.json({
+    // Extract grounding metadata
+    const groundingMetadata = response.candidates?.[0]?.groundingMetadata as GroundingMetadata | undefined;
+    
+    const jsonResponse: any = {
       id: `chatcmpl-${Date.now()}`,
       object: 'chat.completion',
       created: Math.floor(Date.now() / 1000),
@@ -1116,10 +1256,16 @@ async function handleGeminiChat(res: Response, options: {
         completion_tokens: response.usageMetadata?.candidatesTokenCount || 0,
         total_tokens: response.usageMetadata?.totalTokenCount || 0
       }
-    });
+    };
+    
+    // Add grounding info if available
+    if (groundingMetadata) {
+      jsonResponse.grounding = formatGroundingResponse(groundingMetadata);
+    }
+    
+    res.json(jsonResponse);
   }
 }
-// Add this handler function after the existing handleGeminiChat function
 
 async function handleGenAIChat(res: Response, options: {
   modelId: string;
@@ -1129,9 +1275,10 @@ async function handleGenAIChat(res: Response, options: {
   maxTokens: number;
   temperature?: number;
   config: Config;
+  grounding?: GroundingConfig;
 }) {
   const { GoogleGenAI } = await import("@google/genai");
-  const { modelId, system, messages, stream, maxTokens, temperature, config } = options;
+  const { modelId, system, messages, stream, maxTokens, temperature, config, grounding } = options;
   
   const ai = new GoogleGenAI({
     vertexai: true,
@@ -1205,6 +1352,22 @@ async function handleGenAIChat(res: Response, options: {
     parts: await resolveParts(msg.parts)
   })));
 
+  // Build config with optional grounding
+  const genConfig: any = {
+    maxOutputTokens: maxTokens,
+    temperature,
+    systemInstruction: system || undefined
+  };
+  
+  // Build tools array for grounding
+  let tools: any[] | undefined;
+  if (grounding?.enabled) {
+    log(`Enabling Google Search grounding for ${modelId} via GenAI SDK`);
+    tools = [{
+      googleSearch: {}  // GenAI SDK uses simpler format
+    }];
+  }
+
   if (stream) {
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
@@ -1226,15 +1389,19 @@ async function handleGenAIChat(res: Response, options: {
       const response = await ai.models.generateContentStream({
         model: modelId,
         contents,
-        config: {
-          maxOutputTokens: maxTokens,
-          temperature,
-          systemInstruction: system || undefined
-        }
+        config: tools ? { ...genConfig, tools } : genConfig
       });
+
+      let groundingMetadata: GroundingMetadata | null = null;
 
       for await (const chunk of response) {
         const text = chunk.text || "";
+        
+        // Capture grounding metadata
+        if ((chunk as any).groundingMetadata) {
+          groundingMetadata = (chunk as any).groundingMetadata;
+        }
+        
         if (text) {
           const openaiChunk = {
             id: completionId,
@@ -1251,16 +1418,20 @@ async function handleGenAIChat(res: Response, options: {
         }
       }
 
-      // Send final stop chunk before [DONE]
-      const stopChunk = {
+      // Send final stop chunk with grounding info
+      const stopChunk: any = {
         id: completionId,
         object: "chat.completion.chunk",
         created: Math.floor(Date.now() / 1000),
         model: modelId,
         choices: [{ index: 0, delta: {}, finish_reason: "stop" }]
       };
+      
+      if (groundingMetadata) {
+        stopChunk.grounding = formatGroundingResponse(groundingMetadata);
+      }
+      
       res.write(`data: ${JSON.stringify(stopChunk)}\n\n`);
-
       res.write(`data: [DONE]\n\n`);
       res.end();
     } catch (streamError: any) {
@@ -1275,11 +1446,7 @@ async function handleGenAIChat(res: Response, options: {
     const response = await ai.models.generateContent({
       model: modelId,
       contents,
-      config: {
-        maxOutputTokens: maxTokens,
-        temperature,
-        systemInstruction: system || undefined
-      }
+      config: tools ? { ...genConfig, tools } : genConfig
     });
 
     log("GenAI candidates: " + JSON.stringify(response.candidates, null, 2).slice(0, 2000));
@@ -1313,6 +1480,9 @@ async function handleGenAIChat(res: Response, options: {
     
     log("Extracted text length: " + text.length + ", images: " + images.length);
     
+    // Extract grounding metadata
+    const groundingMetadata = (response.candidates?.[0] as any)?.groundingMetadata as GroundingMetadata | undefined;
+    
     const result: any = {
       id: `chatcmpl-${Date.now()}`,
       object: "chat.completion",
@@ -1336,6 +1506,11 @@ async function handleGenAIChat(res: Response, options: {
         b64_json: img.data,
         content_type: img.mimeType
       }));
+    }
+    
+    // Add grounding info if available
+    if (groundingMetadata) {
+      result.grounding = formatGroundingResponse(groundingMetadata);
     }
     
     res.json(result);
@@ -1423,7 +1598,7 @@ async function handleAnthropicMessages(req: Request, res: Response, config: Conf
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
+        res.setHeader('X-Accel-Buffering', 'no');
         
         const reader = response.body?.getReader();
         const decoder = new TextDecoder();
@@ -2008,7 +2183,7 @@ export async function startProxy(daemonMode = false) {
   app.get('/', (req, res) => {
     res.json({
       name: 'Vertex AI Proxy',
-      version: '1.1.0',
+      version: '1.2.0',
       status: 'running',
       project: config.project_id,
       uptime: Math.floor((Date.now() - proxyStats.startTime) / 1000),
@@ -2017,6 +2192,9 @@ export async function startProxy(daemonMode = false) {
         claude: config.default_region,
         gemini: config.google_region,
         imagen: config.google_region
+      },
+      features: {
+        grounding: 'Enabled via X-Enable-Grounding header or grounding body param'
       },
       endpoints: {
         models: '/v1/models',
@@ -2052,7 +2230,7 @@ export async function startProxy(daemonMode = false) {
   const server = app.listen(port, () => {
     const banner = `
 ╔══════════════════════════════════════════════════════════╗
-║                  Vertex AI Proxy v1.1.0                  ║
+║                  Vertex AI Proxy v1.2.0                  ║
 ╠══════════════════════════════════════════════════════════╣
 ║  Status:    Running                                      ║
 ║  Port:      ${port.toString().padEnd(45)}║
@@ -2069,6 +2247,7 @@ export async function startProxy(daemonMode = false) {
 ╠══════════════════════════════════════════════════════════╣
 ║  Features:                                               ║
 ║    • Dynamic region fallback (us-east5 → global → EU)    ║
+║    • Google Search Grounding (Gemini models)             ║
 ║    • Logs: ~/.vertex_proxy/proxy.log                     ║
 ╚══════════════════════════════════════════════════════════╝
 `;
