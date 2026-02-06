@@ -12,6 +12,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as yaml from 'js-yaml';
 import { loadRegionCache } from './regions.js';
+import { discoverModels } from './discover.js';
 
 // ============================================================================
 // Types
@@ -160,6 +161,17 @@ function loadStats(): ProxyStats | null {
 
 export const MODEL_CATALOG: Record<string, ModelSpec> = {
   // Claude Models
+  'claude-opus-4-6': {
+    id: 'claude-opus-4-6',
+    name: 'Claude Opus 4.6',
+    provider: 'anthropic',
+    contextWindow: 200000,
+    maxTokens: 64000,
+    inputPrice: 15,
+    outputPrice: 75,
+    regions: ['us-east5', 'europe-west1', 'asia-southeast1', 'global'],
+    capabilities: ['text', 'vision', 'tools']
+  },
   'claude-opus-4-5@20251101': {
     id: 'claude-opus-4-5@20251101',
     name: 'Claude Opus 4.5',
@@ -672,7 +684,7 @@ async function handleChatCompletions(req: Request, res: Response, config: Config
     log(`[${requestId}] ERROR caught in handleChatCompletions: ${error.message}`, 'ERROR');
     log(`[${requestId}] Error stack: ${error.stack}`, 'ERROR');
 
-    // If headers already sent (streaming started), we can't send JSON error
+    // If headers already sent (streaming started), we can't send JSON error or try fallback
     if (res.headersSent) {
       log(`[${requestId}] Headers already sent, ending response. Writable: ${res.writable}, Finished: ${res.writableFinished}`, 'WARN');
       if (res.writable) {
@@ -681,16 +693,16 @@ async function handleChatCompletions(req: Request, res: Response, config: Config
       return;
     }
 
-    // Try fallback if configured
+    // Try model-level fallback if configured and headers not yet sent
     const fallbacks = config.fallback_chains[modelId];
     if (fallbacks && fallbacks.length > 0) {
-      log(`[${requestId}] Trying model fallback: ${fallbacks[0]}`);
+      log(`[${requestId}] Trying model fallback: ${fallbacks[0]} (headers sent: ${res.headersSent})`);
       req.body.model = fallbacks[0];
       return handleChatCompletions(req, res, config);
     }
 
     log(`[${requestId}] Sending error response`);
-    res.status(500).json({
+    res.status(error.status || 500).json({
       error: {
         message: error.message,
         type: 'proxy_error',
@@ -1384,6 +1396,13 @@ async function handleGenAIChat(res: Response, options: {
     systemInstruction: system || undefined
   };
   
+  // Enable image generation output modalities for capable models
+  const modelSpec = getModelSpec(modelId);
+  if (modelSpec?.capabilities.includes('image-generation')) {
+    genConfig.responseModalities = ["TEXT", "IMAGE"];
+    log(`Enabling responseModalities [TEXT, IMAGE] for ${modelId}`);
+  }
+
   // Build tools array for grounding
   let tools: any[] | undefined;
   if (grounding?.enabled) {
@@ -1468,11 +1487,18 @@ async function handleGenAIChat(res: Response, options: {
       res.end();
     }
   } else {
-    const response = await ai.models.generateContent({
-      model: modelId,
-      contents,
-      config: tools ? { ...genConfig, tools } : genConfig
-    });
+    let response: any;
+    try {
+      response = await ai.models.generateContent({
+        model: modelId,
+        contents,
+        config: tools ? { ...genConfig, tools } : genConfig
+      });
+    } catch (genError: any) {
+      log(`GenAI generateContent error for ${modelId}: ${genError.message}`, 'ERROR');
+      log(`GenAI error details: ${JSON.stringify(genError.response?.data || genError.cause || {}).slice(0, 1000)}`, 'ERROR');
+      throw { status: genError.status || 500, message: `GenAI error: ${genError.message}` };
+    }
 
     log("GenAI candidates: " + JSON.stringify(response.candidates, null, 2).slice(0, 2000));
     
@@ -1482,15 +1508,26 @@ async function handleGenAIChat(res: Response, options: {
     
     try {
       if (response.candidates && response.candidates[0]?.content?.parts) {
-        for (const part of response.candidates[0].content.parts as any[]) {
+        const parts = response.candidates[0].content.parts as any[];
+        log(`GenAI response has ${parts.length} parts, types: ${parts.map((p: any) => p.text ? 'text' : p.inlineData ? 'inlineData' : p.thought ? 'thought' : Object.keys(p).join('+')).join(', ')}`);
+        
+        for (const part of parts) {
           if (part.text && !part.thought) {
             text += part.text;
           } else if (part.inlineData) {
+            log(`Found inlineData: mimeType=${part.inlineData.mimeType}, data length=${part.inlineData.data?.length || 0}`);
             images.push({
               mimeType: part.inlineData.mimeType || "image/png",
               data: part.inlineData.data || ""
             });
           }
+        }
+      } else {
+        log(`GenAI response structure: candidates=${!!response.candidates}, content=${!!response.candidates?.[0]?.content}, parts=${!!response.candidates?.[0]?.content?.parts}`, 'WARN');
+        // Log the full response structure for debugging
+        log(`GenAI full response keys: ${JSON.stringify(Object.keys(response || {}))}`);
+        if (response.candidates?.[0]) {
+          log(`GenAI candidate[0] keys: ${JSON.stringify(Object.keys(response.candidates[0]))}`);
         }
       }
       // Fallback to response.text if no text found
@@ -1499,11 +1536,17 @@ async function handleGenAIChat(res: Response, options: {
           text = response.text || "";
         } catch (e) {}
       }
-    } catch (e) {
+    } catch (e: any) {
+      log(`Error extracting GenAI response: ${e.message}`, 'ERROR');
       text = "";
     }
     
     log("Extracted text length: " + text.length + ", images: " + images.length);
+    
+    // Warn if image generation model returned no images
+    if (modelSpec?.capabilities.includes('image-generation') && images.length === 0) {
+      log(`WARNING: Image-capable model ${modelId} returned 0 images. responseModalities was set to ${JSON.stringify(genConfig.responseModalities)}`, 'WARN');
+    }
     
     // Extract grounding metadata
     const groundingMetadata = (response.candidates?.[0] as any)?.groundingMetadata as GroundingMetadata | undefined;
@@ -1674,14 +1717,28 @@ async function handleAnthropicMessages(req: Request, res: Response, config: Conf
     }
   }
   
-  // All regions failed
-  log(`All regions failed for ${modelId}`, 'ERROR');
-  res.status(lastError?.status || 500).json({
-    error: {
-      type: 'api_error',
-      message: lastError?.message || 'All regions failed'
+  // All regions failed - try model-level fallback if headers not sent
+  if (!res.headersSent) {
+    const fallbacks = config.fallback_chains[modelId];
+    if (fallbacks && fallbacks.length > 0) {
+      log(`All regions failed for ${modelId}, trying model fallback: ${fallbacks[0]}`);
+      // Re-route through the messages handler with fallback model
+      req.body.model = fallbacks[0];
+      return handleAnthropicMessages(req, res, config);
     }
-  });
+  }
+
+  log(`All regions failed for ${modelId}`, 'ERROR');
+  if (!res.headersSent) {
+    res.status(lastError?.status || 500).json({
+      error: {
+        type: 'api_error',
+        message: lastError?.message || 'All regions failed'
+      }
+    });
+  } else if (res.writable) {
+    res.end();
+  }
 }
 
 async function handleModels(req: Request, res: Response, config: Config) {
@@ -2240,6 +2297,27 @@ export async function startProxy(daemonMode = false) {
   });
   
   app.get('/v1/models', (req, res) => handleModels(req, res, config));
+
+  // Model discovery endpoints
+  const handleDiscover = async (req: Request, res: Response) => {
+    try {
+      const regionsParam = req.query.regions as string | undefined;
+      const regionFilter = regionsParam ? regionsParam.split(',').map(r => r.trim()).filter(Boolean) : undefined;
+      log(`Starting model discovery${regionFilter ? ` for regions: ${regionFilter.join(', ')}` : ' (all regions)'}`);
+      const results = await discoverModels(config.project_id, regionFilter);
+      res.json(results);
+    } catch (error: any) {
+      log(`Discovery error: ${error.message}`, 'ERROR');
+      res.status(500).json({
+        error: {
+          message: error.message,
+          type: 'discovery_error'
+        }
+      });
+    }
+  };
+  app.get('/v1/models/discover', handleDiscover);
+  app.post('/v1/models/discover', handleDiscover);
 
   app.post('/v1/chat/completions', (req, res) => handleChatCompletions(req, res, config));
 

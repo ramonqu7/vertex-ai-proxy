@@ -36,18 +36,20 @@ const CLAUDE_MODELS = [
   "claude-3-5-sonnet-v2@20241022",
 ];
 
-export async function discoverModels(projectId: string): Promise<ModelCache> {
+export async function discoverModels(projectId: string, regionFilter?: string[]): Promise<ModelCache> {
   const auth = new GoogleAuth({ scopes: "https://www.googleapis.com/auth/cloud-platform" });
   const client = await auth.getClient();
   const tokenResponse = await client.getAccessToken();
   const accessToken = tokenResponse.token;
+
+  const regionsToCheck = regionFilter && regionFilter.length > 0 ? regionFilter : REGIONS;
 
   const cache: ModelCache = { lastUpdated: Date.now(), models: {} };
 
   for (const modelId of CLAUDE_MODELS) {
     cache.models[modelId] = [];
     
-    for (const region of REGIONS) {
+    for (const region of regionsToCheck) {
       const url = `https://${region}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${region}/publishers/anthropic/models/${modelId}:rawPredict`;
       
       try {
