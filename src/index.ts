@@ -294,6 +294,28 @@ export const MODEL_CATALOG: Record<string, ModelSpec> = {
     outputPrice: 0,
     regions: ['us-central1'],
     capabilities: ['image-generation']
+  },
+  'veo-3.0-generate-preview': {
+    id: 'veo-3.0-generate-preview',
+    name: 'Veo 3',
+    provider: 'google',
+    contextWindow: 0,
+    maxTokens: 0,
+    inputPrice: 0,
+    outputPrice: 0.50,
+    regions: ['us-central1'],
+    capabilities: ['video-generation']
+  },
+  'veo-2.0-generate-001': {
+    id: 'veo-2.0-generate-001',
+    name: 'Veo 2',
+    provider: 'google',
+    contextWindow: 0,
+    maxTokens: 0,
+    inputPrice: 0,
+    outputPrice: 0.35,
+    regions: ['us-central1'],
+    capabilities: ['video-generation']
   }
 };
 
@@ -1959,6 +1981,144 @@ async function handleImageGeneration(req: Request, res: Response, config: Config
 }
 
 // ============================================================================
+// Video Generation Handler (Veo)
+// ============================================================================
+
+// In-memory store for pending video operations
+const pendingVideoOps: Map<string, { name: string; model: string; prompt: string; startedAt: number }> = new Map();
+
+async function handleVideoGeneration(req: Request, res: Response, config: Config) {
+  try {
+    const { model, prompt, poll_id, n = 1 } = req.body;
+    
+    proxyStats.requestCount++;
+    proxyStats.lastRequestTime = Date.now();
+    saveStats();
+
+    // If poll_id is provided, poll an existing operation
+    if (poll_id) {
+      const op = pendingVideoOps.get(poll_id);
+      if (!op) {
+        return res.status(404).json({ error: { message: `Operation ${poll_id} not found`, type: 'not_found' } });
+      }
+
+      const { GoogleAuth } = await import('google-auth-library');
+      const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+      const client = await auth.getClient();
+      const token = await client.getAccessToken();
+
+      // Use fetchPredictOperation endpoint (Vertex AI publisher model operations)
+      const resourceName = op.name.split('/operations/')[0];
+      const pollUrl = `https://us-central1-aiplatform.googleapis.com/v1/${resourceName}:fetchPredictOperation`;
+      const pollResp = await fetch(pollUrl, {
+        method: 'POST',
+        headers: { 
+          'Authorization': `Bearer ${token.token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ operationName: op.name })
+      });
+      const pollData = await pollResp.json() as any;
+
+      if (pollData.done) {
+        pendingVideoOps.delete(poll_id);
+        // Videos can be in response.videos[].bytesBase64Encoded or response.generateVideoResponse.generatedSamples
+        const rawVideos = pollData.response?.videos || pollData.response?.generateVideoResponse?.generatedSamples || [];
+        const videos = [];
+        for (const sample of rawVideos) {
+          if (sample.bytesBase64Encoded) {
+            // Video bytes directly in response
+            videos.push({
+              b64_json: sample.bytesBase64Encoded,
+              content_type: 'video/mp4'
+            });
+            const sizeKB = Math.round(sample.bytesBase64Encoded.length * 0.75 / 1024);
+            log(`Veo: video received inline (${sizeKB} KB)`);
+          } else if (sample.video?.uri) {
+            // Download video bytes from GCS URI
+            const vidResp = await fetch(sample.video.uri, {
+              headers: { 'Authorization': `Bearer ${token.token}` }
+            });
+            const buf = Buffer.from(await vidResp.arrayBuffer());
+            videos.push({
+              b64_json: buf.toString('base64'),
+              content_type: 'video/mp4'
+            });
+            log(`Veo: downloaded video ${buf.length} bytes from ${sample.video.uri}`);
+          }
+        }
+        return res.json({
+          created: Math.floor(Date.now() / 1000),
+          status: 'complete',
+          model: op.model,
+          prompt: op.prompt,
+          data: videos
+        });
+      } else {
+        const elapsed = Math.floor((Date.now() - op.startedAt) / 1000);
+        return res.json({
+          created: Math.floor(Date.now() / 1000),
+          status: 'processing',
+          poll_id,
+          model: op.model,
+          prompt: op.prompt,
+          elapsed_seconds: elapsed,
+          message: `Video is being generated (${elapsed}s elapsed). Poll again in 10-15 seconds.`
+        });
+      }
+    }
+
+    // Start a new video generation
+    if (!prompt) {
+      return res.status(400).json({ error: { message: 'prompt is required', type: 'invalid_request_error' } });
+    }
+
+    let resolvedModel = config.model_aliases[model] || model || 'veo-3.0-generate-preview';
+    const modelSpec = MODEL_CATALOG[resolvedModel];
+    
+    if (!modelSpec || !modelSpec.capabilities.includes('video-generation')) {
+      return res.status(400).json({
+        error: { message: `Model ${resolvedModel} does not support video generation. Use veo-3.0-generate-preview or veo-2.0-generate-001`, type: 'invalid_request_error' }
+      });
+    }
+
+    log(`Veo: ${resolvedModel}, prompt="${prompt.substring(0, 80)}..."`);
+
+    const { GoogleGenAI } = await import('@google/genai');
+    const ai = new GoogleGenAI({ vertexai: true, project: config.project_id, location: 'us-central1' });
+
+    const operation = await ai.models.generateVideos({
+      model: resolvedModel,
+      prompt,
+      config: { numberOfVideos: Math.min(n, 4) }
+    });
+
+    const opId = `veo-${Date.now()}-${Math.random().toString(36).substr(2, 8)}`;
+    pendingVideoOps.set(opId, {
+      name: operation.name!,
+      model: resolvedModel,
+      prompt,
+      startedAt: Date.now()
+    });
+
+    log(`Veo: operation started: ${operation.name}, poll_id: ${opId}`);
+
+    res.json({
+      created: Math.floor(Date.now() / 1000),
+      status: 'processing',
+      poll_id: opId,
+      model: resolvedModel,
+      prompt,
+      message: 'Video generation started. Poll with poll_id to check progress (typically 1-3 minutes).'
+    });
+
+  } catch (error: any) {
+    log(`Veo error: ${error.message}`, 'ERROR');
+    res.status(500).json({ error: { message: error.message, type: 'api_error' } });
+  }
+}
+
+// ============================================================================
 // Completions Handler (Legacy OpenAI API)
 // ============================================================================
 
@@ -2382,6 +2542,8 @@ export async function startProxy(daemonMode = false) {
   
   // Image generation (Imagen)
   app.post('/v1/images/generations', (req, res) => handleImageGeneration(req, res, config));
+
+  app.post('/v1/videos/generations', (req, res) => handleVideoGeneration(req, res, config));
   
   // Start server
   const server = app.listen(port, () => {
@@ -2401,6 +2563,7 @@ export async function startProxy(daemonMode = false) {
 ║    POST /v1/completions         OpenAI completions       ║
 ║    POST /v1/messages            Anthropic format         ║
 ║    POST /v1/images/generations  Image generation         ║
+║    POST /v1/videos/generations  Video generation (Veo)   ║
 ╠══════════════════════════════════════════════════════════╣
 ║  Features:                                               ║
 ║    • Dynamic region fallback (us-east5 → global → EU)    ║
