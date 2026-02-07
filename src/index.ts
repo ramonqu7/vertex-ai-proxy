@@ -435,6 +435,49 @@ function getModelSpec(modelId: string): ModelSpec | undefined {
   return MODEL_CATALOG[modelId];
 }
 
+/**
+ * Convert OpenAI-format content blocks to Anthropic format.
+ * Handles image_url -> image conversion (base64 data URIs and remote URLs).
+ */
+function convertContentForAnthropic(content: string | any[]): string | any[] {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return content;
+
+  return content.map(block => {
+    if (!block || typeof block !== 'object') return block;
+
+    if (block.type === 'image_url') {
+      const imageUrl = block.image_url;
+      const url = typeof imageUrl === 'string' ? imageUrl : imageUrl?.url || '';
+
+      if (url.startsWith('data:')) {
+        // data:<media_type>;base64,<data>
+        const commaIndex = url.indexOf(',');
+        const header = url.slice(0, commaIndex);
+        const b64data = url.slice(commaIndex + 1);
+        const mediaType = header.split(':')[1]?.split(';')[0] || 'image/png';
+        return {
+          type: 'image',
+          source: { type: 'base64', media_type: mediaType, data: b64data }
+        };
+      }
+
+      // Remote URL — Anthropic supports url source type
+      return {
+        type: 'image',
+        source: { type: 'url', url }
+      };
+    }
+
+    if (block.type === 'text') {
+      return { type: 'text', text: block.text ?? '' };
+    }
+
+    // Pass through already-valid Anthropic types
+    return block;
+  });
+}
+
 function extractSystemMessage(messages: ChatMessage[]): { system: string | null; messages: ChatMessage[] } {
   let system: string | null = null;
   const filteredMessages: ChatMessage[] = [];
@@ -841,10 +884,10 @@ async function handleAnthropicChat(res: Response, options: {
         content
       });
     } else {
-      // Regular message
+      // Regular message — convert content blocks if needed
       anthropicMessages.push({
         role: msg.role as 'user' | 'assistant',
-        content: msg.content
+        content: convertContentForAnthropic(msg.content)
       });
     }
   }
@@ -1396,6 +1439,17 @@ async function handleGenAIChat(res: Response, options: {
     systemInstruction: system || undefined
   };
   
+  // Enable thinking config for thinking models (Gemini 3 Pro, 2.5 Pro/Flash)
+  // These models use internal reasoning that counts against maxOutputTokens.
+  // Set a thinkingBudget so thinking doesn't consume all output tokens.
+  const thinkingModels = ['gemini-3-pro-preview', 'gemini-2.5-pro', 'gemini-2.5-flash'];
+  if (thinkingModels.some(m => modelId.includes(m))) {
+    // Budget thinking to at most 80% of maxTokens, leaving 20%+ for actual output
+    const thinkingBudget = Math.min(Math.floor(maxTokens * 0.8), 24576);
+    genConfig.thinkingConfig = { thinkingBudget };
+    log(`Enabling thinkingConfig for ${modelId}: budget=${thinkingBudget} (maxTokens=${maxTokens})`);
+  }
+
   // Enable image generation output modalities for capable models
   const modelSpec = getModelSpec(modelId);
   if (modelSpec?.capabilities.includes('image-generation')) {
@@ -2025,7 +2079,7 @@ async function handleAnthropicCompletions(res: Response, options: {
 
       const anthropicMessages = messages.map(msg => ({
         role: msg.role as 'user' | 'assistant',
-        content: msg.content
+        content: convertContentForAnthropic(msg.content)
       }));
 
       const requestBody: any = {
